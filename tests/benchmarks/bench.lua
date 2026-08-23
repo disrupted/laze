@@ -98,3 +98,32 @@ for _, scale in ipairs({ 10, 50, 100, 200 }) do
 		)
 	)
 end
+
+print("\n=== name derivation ===\n")
+
+-- pkg_name/derive_name are pure string work per spec; this tracks their
+-- constant factor (the parity with vim.pack's on-disk names is asserted by
+-- the integration suite, not here).
+local compile_mod = require("laze.compile")
+local srcs = {}
+for i = 1, 10000 do
+	srcs[i] = ("https://github.com/user/plugin-%d.git"):format(i)
+end
+
+-- Warmup JIT
+for i = 1, 100 do
+	compile_mod.pkg_name(srcs[i])
+	compile_mod.derive_name(srcs[i])
+end
+
+local best, acc = math.huge, 0
+for _ = 1, 3 do
+	local t0 = uv.hrtime()
+	acc = 0
+	for i = 1, #srcs do
+		acc = acc + #compile_mod.pkg_name(srcs[i]) + #compile_mod.derive_name(srcs[i])
+	end
+	best = math.min(best, elapsed_us(t0))
+end
+print(("derive_name+pkg_name x%d: %6.0f μs best-of-3 (%.3f μs/pair, acc=%d)"):format(#srcs, best, best / #srcs, acc))
+

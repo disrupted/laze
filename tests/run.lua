@@ -934,6 +934,191 @@ do
 	vim.fn.delete(root, "rf")
 end
 
+-- pkg-name parity: laze's compile-time `pkg` derivation must match the
+-- directory names vim.pack actually creates on disk — the mirror of
+-- vim.pack's internal name rules is hand-written, so upstream drift would
+-- otherwise show up as silent re-clones under different directories. Two
+-- spawned sessions install the SAME local-git-repo specs (one through
+-- laze.compile → vim.pack.add(compiled.pack), one through raw
+-- vim.pack.add) and both disk listings are compared against the predicted
+-- names.
+do
+	local root = vim.fn.tempname() .. "_lazepkg"
+	vim.fn.mkdir(root, "p")
+
+	local function make_repo(name, files)
+		local dir = root .. "/" .. name
+		vim.fn.mkdir(dir, "p")
+		for rel, content in pairs(files) do
+			local file = dir .. "/" .. rel
+			vim.fn.mkdir(vim.fn.fnamemodify(file, ":h"), "p")
+			local fd = io.open(file, "w")
+			fd:write(content)
+			fd:close()
+		end
+		vim.system({ "git", "init", "-q" }, { cwd = dir }):wait()
+		vim.system({ "git", "add", "-A" }, { cwd = dir }):wait()
+		vim.system({
+			"git", "-c", "user.email=laze@local", "-c", "user.name=laze", "commit", "-qm", "init",
+		}, { cwd = dir }):wait()
+		return dir
+	end
+
+	-- Shapes that MUST stay in parity (trailing slash is a documented,
+	-- unit-tested deviation: laze tolerates it lazy-style, vim.pack errors).
+	local rows = {
+		{ repo = "parity-plain",         want = "parity-plain" },
+		{ repo = "parity-dotted.nvim",   want = "parity-dotted.nvim" },
+		{ repo = "parity-dotgit.git",    want = "parity-dotgit" },
+		{ repo = "nested/parity-nested", want = "parity-nested" },
+		{ repo = "parity-renamed",       name = "custom-named", want = "custom-named" },
+	}
+	for _, row in ipairs(rows) do
+		row.src = make_repo(row.repo, { ["plugin/x.lua"] = "" })
+	end
+
+	local function spec_lines()
+		local out = {}
+		for _, row in ipairs(rows) do
+			if row.name then
+				out[#out + 1] = ('\t{ src = %q, name = %q },'):format(row.src, row.name)
+			else
+				out[#out + 1] = ('\t{ src = %q },'):format(row.src)
+			end
+		end
+		return table.concat(out, "\n")
+	end
+
+	local errs = {}
+	local function run_install(mode)
+		local data = root .. "/" .. mode .. "-data"
+		local config = root .. "/" .. mode .. "-config"
+		vim.fn.mkdir(config, "p")
+		local body
+		if mode == "laze" then
+			body = table.concat({
+				'vim.opt.packpath:prepend(vim.fn.stdpath("data"))',
+				('vim.opt.rtp:prepend(%q)'):format(vim.fn.getcwd()),
+				'local laze = require("laze")',
+				"local compiled = laze.compile({",
+				spec_lines(),
+				"})",
+				'local pkgs = {}',
+				'for id, e in pairs(compiled.registry) do pkgs[#pkgs + 1] = id .. "\\t" .. tostring(e.pkg) end',
+				"table.sort(pkgs)",
+				('vim.fn.writefile(pkgs, %q)'):format(root .. "/pkg-laze.txt"),
+				"vim.pack.add(compiled.pack)",
+			}, "\n")
+		else
+			body = table.concat({
+				'vim.opt.packpath:prepend(vim.fn.stdpath("data"))',
+				"local specs = {",
+				spec_lines(),
+				"}",
+				"vim.pack.add(specs)",
+			}, "\n")
+		end
+		local init_file = config .. "/init.lua"
+		local fd = io.open(init_file, "w")
+		fd:write(body)
+		fd:close()
+		local proc = vim.system({ vim.v.progpath, "-u", init_file, "--headless", "+qa" }, {
+			env = {
+				XDG_DATA_HOME = data,
+				XDG_CONFIG_HOME = config,
+				NVIM_LOG_FILE = root .. "/nvim-" .. mode .. ".log",
+			},
+		}):wait()
+		if proc.code ~= 0 then
+			errs[mode] = "exit " .. proc.code .. ": " .. (proc.stderr or "")
+		elseif (proc.stderr or "") ~= "" then
+			errs[mode] = proc.stderr
+		end
+		return data .. "/nvim/site/pack/core/opt"
+	end
+
+	local ok = true
+	local details = {}
+
+	local function read_list(path, what)
+		if vim.fn.filereadable(path) == 0 then
+			ok = false
+			table.insert(details, what .. " result missing (session error)")
+			return {}
+		end
+		return vim.fn.readfile(path)
+	end
+
+	local function read_dir(path, what)
+		if vim.fn.isdirectory(path) == 0 then
+			ok = false
+			table.insert(details, what .. " missing (session error)")
+			return {}
+		end
+		return vim.fn.readdir(path)
+	end
+
+	local opt_laze = run_install("laze")
+	local opt_vpack = run_install("vpack")
+
+	local pkgs = read_list(root .. "/pkg-laze.txt", "laze predicted-pkg")
+	local disk_laze = read_dir(root .. "/laze-data/nvim/site/pack/core/opt", "laze disk")
+	local disk_vpack = read_dir(root .. "/vpack-data/nvim/site/pack/core/opt", "vpack disk")
+
+	local function has(list, v)
+		for _, x in ipairs(list) do
+			if x == v then
+				return true
+			end
+		end
+		return false
+	end
+
+	if #disk_laze > 0 and #disk_laze ~= #rows then
+		ok = false
+		table.insert(details, ("laze disk entries=%d (want %d)"):format(#disk_laze, #rows))
+	end
+	if #disk_vpack > 0 and #disk_vpack ~= #rows then
+		ok = false
+		table.insert(details, ("vpack disk entries=%d (want %d)"):format(#disk_vpack, #rows))
+	end
+
+	for _, row in ipairs(rows) do
+		local predicted = false
+		for _, line in ipairs(pkgs) do
+			local id, pkg = line:match("^(%S+)\t(.+)$")
+			if pkg == row.want and (id or "") ~= "" then
+				predicted = true
+			end
+		end
+		local l_disk = has(disk_laze, row.want)
+		local v_disk = has(disk_vpack, row.want)
+		if not (predicted and l_disk and v_disk) then
+			ok = false
+			table.insert(
+				details,
+				("%s: predicted=%s laze-disk=%s vpack-disk=%s"):format(row.want, tostring(predicted), tostring(l_disk), tostring(v_disk))
+			)
+		end
+	end
+
+	if ok then
+		print(("  ✓ pkg names: laze derivation matches vim.pack on disk (%d shapes, laze + raw sessions)"):format(#rows))
+		passed = passed + 1
+	else
+		local msg = table.concat(details, "; ")
+		for mode, e in pairs(errs) do
+			if e ~= "" then
+				msg = msg .. (" | %s-stderr: %s"):format(mode, (e:gsub("%s+", " ")):sub(1, 220))
+			end
+		end
+		print(("  ✗ pkg names: %s"):format(msg))
+		failed = failed + 1
+	end
+
+	vim.fn.delete(root, "rf")
+end
+
 -- reload_all: re-runs setup with a fresh plan (dev-loop workflow). Dir
 -- specs keep this offline (no vim.pack installs) while exercising the
 -- real setup → plan → reload path.
