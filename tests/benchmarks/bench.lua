@@ -43,16 +43,19 @@ local t0 = uv.hrtime()
 local compiled = laze.compile(specs)
 print(("compile %d specs: %.0f μs"):format(N, elapsed_us(t0)))
 
+-- Disable BEFORE build_plan: the plan resolves `enabled` once at build
+-- time, so disabling afterwards has no effect on the built plan and
+-- plan() would still attempt eager activation below.
+for _, entry in pairs(compiled.registry) do
+	entry.enabled = false
+end
+
 -- build_plan
 local t1 = uv.hrtime()
 local plan = laze.build_plan(compiled)
 print(("build_plan:     %.0f μs"):format(elapsed_us(t1)))
 
 -- plan() — only trigger registration, not plugin loading
--- Disable all plugins so plan() skips load_with_deps
-for _, entry in pairs(compiled.registry) do
-	entry.enabled = false
-end
 local t2 = uv.hrtime()
 plan()
 print(("plan() (no load): %.0f μs"):format(elapsed_us(t2)))
@@ -84,10 +87,10 @@ for _, scale in ipairs({ 10, 50, 100, 200 }) do
 		})
 	end
 	local c = laze.compile(big)
-	local p = laze.build_plan(c)
 	for _, entry in pairs(c.registry) do
 		entry.enabled = false
 	end
+	local p = laze.build_plan(c)
 	local t0 = uv.hrtime()
 	p()
 	print(
