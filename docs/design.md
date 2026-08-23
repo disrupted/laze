@@ -28,6 +28,47 @@ Breaking this invariant produces double-source (side effects run twice) or missi
 
 Note: `:packadd` after startup also sources `ftdetect/`; during startup the runtime's filetype machinery picks it up from the runtimepath on demand.
 
+## Loading laze itself
+
+Laze is installed and managed by `vim.pack` like any other plugin — but that
+does not mean it must be **loaded** through `vim.pack.add()` on every startup.
+`vim.pack.add` has a per-call fixed cost (~2 ms measured: filesystem checks
+plus runtimepath work, independent of plugin count), and paying it just to
+make one already-installed module requirable is waste.
+
+The cheap load pattern (used in the author's config):
+
+```lua
+vim.opt.rtp:prepend(vim.fn.stdpath("data") .. "/site/pack/core/opt/laze")
+local ok, laze = pcall(require, "laze")
+if not ok then
+	-- Fresh machine only: install through the normal path once.
+	vim.pack.add({ "https://github.com/sys9kdr/laze" })
+	laze = require("laze")
+end
+laze.setup(require("config-extensions"))
+```
+
+Why this is safe despite looking like a layering violation:
+
+* Management and loading are orthogonal. `vim.pack.update/del/get` operate on
+  everything under the managed `site/pack/core/opt` directory; they never
+  require the plugin to have been added in the current session.
+* Lockfile synchronization runs on the *first* `vim.pack` function call —
+  which is inside `setup()`, since laze always calls `vim.pack.add` for the
+  user's specs. A fresh-machine install via the fallback also keeps the
+  lockfile consistent.
+* The plugin shows up as `active = false` in `vim.pack.get()` output. That is
+  cosmetic: "not added this session", not "unmanaged".
+
+What does NOT work: copying laze into a plain `pack/*/start/` directory of
+'packpath'. Native startup would source it for free, but plugins outside
+`site/pack/core/opt` are invisible to `vim.pack.update`, the lockfile, and
+`PackChanged` build hooks — you would be back to manual `git pull`.
+
+Measured head-to-head (headless `--startuptime`, 7 samples each, same
+machine/minute): startup median 43.9 ms → 41.0 ms with the pattern above.
+
 ## Notes
 
 * `vim.loader.enable()` should be called early.
