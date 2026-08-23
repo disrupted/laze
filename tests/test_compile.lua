@@ -165,6 +165,18 @@ local derive_cases = {
 	{ "https://github.com/user/repo.nvim.git", "repo", ".git then .nvim stripped" },
 	{ "https://github.com/user/plugin/", "plugin", "trailing slash tolerated" },
 	{ "https://github.com/user/plugin.git/", "plugin", "trailing slash after .git" },
+	{ "https://github.com/user/repo//", "https://github.com/user/repo/", "double trailing slash: pattern fails, raw fallback (match parity)" },
+	{ "///", "//", "all-separator input falls back raw" },
+	{ ":", ":", "lone colon falls back raw" },
+	{ "a:b/c", "c", "colon and slash both segment separators" },
+	{ "x.lua.nvim", "x", ".nvim then .lua stripped sequentially" },
+	{ "x.nvim.lua", "x.nvim", "only trailing .lua stripped in one pass" },
+	{ ".git", "", "whole-string .git strip empties the name" },
+	{ "", "", "empty src yields empty name" },
+	{ ".nvim", "", "whole-string .nvim strip empties the name" },
+	{ "repo.nvim/", "repo", "trailing slash then suffix strip" },
+	{ "a/b/.git", "a/b/", ".git strip leaves trailing slash: raw fallback (match parity)" },
+	{ "A/B.NVIM", "B.NVIM", "suffix match is case-sensitive" },
 }
 
 for _, case in ipairs(derive_cases) do
@@ -216,11 +228,82 @@ local pkg_cases = {
 	{ "https://github.com/user/plugin.git/", nil, "plugin", "slash then .git" },
 	{ "https://github.com/", nil, "github.com", "host-only URL: host as name" },
 	{ "user/repo", "custom", "custom", "explicit name wins" },
+	{ "https://github.com/user/repo//", nil, "https://github.com/user/repo/", "double trailing slash: raw fallback (match parity)" },
+	{ "//:", nil, "//:", "all-separator input falls back raw" },
+	{ "user/repo.git.git", nil, "repo.git", "only one .git stripped" },
+	{ "a/b/.git", nil, "a/b/", ".git strip leaves trailing slash: raw fallback (match parity)" },
+	{ "p%1", nil, "p%1", "percent byte is literal (no gsub replacement semantics)" },
 }
 
 for _, case in ipairs(pkg_cases) do
 	check(pkg_name(case[1], case[2]), case[3], case[4])
 end
+
+print("\n=== name derivation fuzz (vs frozen pattern oracle) ===\n")
+
+-- last_segment() replaced string.match/gsub for speed. The old pattern
+-- implementations are kept here as a frozen reference oracle: any future
+-- edit to derive_name/pkg_name must stay equivalent to them, checked over
+-- deterministic pseudo-random inputs each run.
+local function oracle_derive(src)
+	local name = src
+	if name:sub(-1) == "/" then
+		name = name:sub(1, -2)
+	end
+	if name:sub(-4) == ".git" then
+		name = name:sub(1, -5)
+	end
+	name = name:match("([^/:]+)$") or name
+	name = name:gsub("%.nvim$", "")
+	name = name:gsub("%.lua$", "")
+	return name
+end
+
+local function oracle_pkg(src, spec_name)
+	if spec_name then
+		return spec_name
+	end
+	local name = src
+	if name:sub(-1) == "/" then
+		name = name:sub(1, -2)
+	end
+	name = name:gsub("%.git$", "")
+	return name:match("([^/:]+)$") or name
+end
+
+local rng_state = 0
+local function rng()
+	rng_state = (1103515245 * rng_state + 12345) % 2147483648
+	return rng_state / 2147483648
+end
+
+local fuzz_alphabet = { "/", ":", ".", "g", "i", "t", "n", "v", "m", "l", "u", "a", "@", "~", "-", "%", "\0" }
+local function fuzz_input()
+	local len = math.floor(rng() ^ 2 * 40) -- biased short, up to 40 bytes
+	local chars = {}
+	for i = 1, len do
+		chars[i] = fuzz_alphabet[math.floor(rng() * #fuzz_alphabet) + 1]
+	end
+	return table.concat(chars)
+end
+
+local fuzz_bad, fuzz_n = 0, 0
+for _, seed in ipairs({ 20260824, 1, 424242 }) do
+	rng_state = seed
+	for _ = 1, 10000 do
+		local s = fuzz_input()
+		fuzz_n = fuzz_n + 1
+		if derive_name(s) ~= oracle_derive(s) then
+			fuzz_bad = fuzz_bad + 1
+			print(("  \xe2\x9c\x97 derive mismatch on %q"):format(s))
+		end
+		if pkg_name(s, nil) ~= oracle_pkg(s, nil) then
+			fuzz_bad = fuzz_bad + 1
+			print(("  \xe2\x9c\x97 pkg mismatch on %q"):format(s))
+		end
+	end
+end
+expect(fuzz_bad == 0, ("%d fuzz inputs x2 derivations match the pattern oracle"):format(fuzz_n))
 
 print("\n=== resolve_src tests ===\n")
 

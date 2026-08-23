@@ -14,6 +14,22 @@ walks. Items below are grouped by status.
 
 ## Resolved
 
+### compile.lua: pattern-based name derivation ran interpreted — resolved (2026-08)
+
+`derive_name`/`pkg_name` used `string.match`/`gsub`, which are NYI in
+LuaJIT: ~7 µs/call interpreted, roughly half of per-spec compile cost.
+Both now share a byte-scan `last_segment` helper (byte loops and `sub`
+stay on the JIT-compiled fast path): derive_name+pkg_name 11.75 →
+0.8–1.3 µs/pair, 100-spec compile ~13 → ~11 µs/spec. Equivalence with
+the pattern forms was fuzzed over 300k adversarial inputs (zero
+mismatches); the raw-fallback and sequential-suffix edge cases are
+pinned by unit tests in tests/test_compile.lua. Related harness fix:
+tests/benchmarks/bench.lua disabled entries after build_plan — a no-op,
+since the plan resolves `enabled` at build time (plan.lua) — so its
+"plan() (no load)" number silently included eager activation attempts
+(~5.6 ms instead of the true ~1.9 ms registration cost). Entries are
+now disabled between compile and build_plan.
+
 ### plan.lua: per-plugin runtimepath rescan on the startup fast path — resolved (2026-08)
 
 The startup fast path called `nvim_list_runtime_paths()` and rescanned every

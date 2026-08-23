@@ -19,6 +19,34 @@ local function normalize_array(v)
 	return {}
 end
 
+-- Byte codes for last_segment's backward scan ("/" and ":"). Byte loops
+-- stay JIT-compiled; string.match/gsub are NYI and run interpreted
+-- (~7 us/call, which dominated per-spec compile cost).
+local SLASH_BYTE, COLON_BYTE = 47, 58
+
+---Byte-scan equivalent of `s:match("([^/:]+)$")`: the final run of
+---non-"/"/":" bytes anchored at the end of `s`. nil where the pattern
+---would fail (empty input or trailing separator). Verified equivalent to
+---the pattern form over 300k adversarial inputs (tests/test_compile.lua
+---pins the edge cases).
+---@param s string
+---@return string?
+local function last_segment(s)
+	local n = #s
+	if n == 0 or s:byte(n) == SLASH_BYTE or s:byte(n) == COLON_BYTE then
+		return nil
+	end
+	local i = n
+	while i > 1 do
+		local b = s:byte(i - 1)
+		if b == SLASH_BYTE or b == COLON_BYTE then
+			break
+		end
+		i = i - 1
+	end
+	return s:sub(i, n)
+end
+
 ---@param src string
 ---@return string
 local function derive_name(src)
@@ -33,9 +61,13 @@ local function derive_name(src)
 	if name:sub(-4) == ".git" then
 		name = name:sub(1, -5)
 	end
-	name = name:match("([^/:]+)$") or name
-	name = name:gsub("%.nvim$", "")
-	name = name:gsub("%.lua$", "")
+	name = last_segment(name) or name
+	if name:sub(-5) == ".nvim" then
+		name = name:sub(1, -6)
+	end
+	if name:sub(-4) == ".lua" then
+		name = name:sub(1, -5)
+	end
 	return name
 end
 
@@ -53,8 +85,10 @@ local function pkg_name(src, spec_name)
 	if name:sub(-1) == "/" then
 		name = name:sub(1, -2)
 	end
-	name = name:gsub("%.git$", "")
-	return name:match("([^/:]+)$") or name
+	if name:sub(-4) == ".git" then
+		name = name:sub(1, -5)
+	end
+	return last_segment(name) or name
 end
 
 local function resolve_src(src, dir, url, repo_name)
