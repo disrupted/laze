@@ -591,7 +591,6 @@ function compile(specs, opts)
 		local url = spec.url
 		local base_src = src or dir or url
 		local name = spec.name or derive_name(base_src)
-		local repo_name = derive_name(base_src or name)
 		-- Directory name under pack/<pkg>/opt/ — matches vim.pack's own
 		-- derivation unless the user pinned an explicit `name`.
 		local pkg = pkg_name(base_src or name, spec.name)
@@ -670,7 +669,7 @@ function compile(specs, opts)
 				dev_path = spec.dev_path,
 			}
 
-		local resolved_src = resolve_src(norm.src, norm.dir, norm.url, repo_name)
+		local resolved_src = resolve_src(norm.src, norm.dir, norm.url)
 
 		-- Module name(s) that trigger lazy load on require(). Explicit only —
 		-- never derived from the source, since repo names don't reliably match

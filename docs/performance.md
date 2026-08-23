@@ -14,6 +14,23 @@ walks. Items below are grouped by status.
 
 ## Resolved
 
+### plan.lua: redundant glob + `:packadd!` for already-active plugins — resolved (2026-08)
+
+`vim.pack.add(..., { load = false })` already runs `:packadd!` per eager
+plugin before the plan executes; the plan's own activation then repeated
+a directory glob plus another `:packadd!` (an rtp-deduped no-op that
+still costs an API roundtrip). During startup the plan now checks the
+runtimepath first (`active_pack_dir`, mirroring the glob's
+`pack/*/opt/<pkg>` shape and first-match rule) and skips both when the
+directory is present; post-startup loads keep the full path (`:packadd`
+without bang is what sources `plugin/`). Also hoisted
+`stdpath("data")` to plan scope and added a no-deps fast path to
+`load_with_deps`. Spawned-session A/B (40 specs, 20 eager): setup median
+~51 ms vs ~61 ms baseline; semantics identical (eager sourced once,
+rtp state equal). compile-side: removed the dead `repo_name`
+computation (one unused `derive_name` chain per spec): 0.37 → 0.28 ms
+per 50-spec compile (best-of-30).
+
 ### compile.lua: per-spec table literals — resolved (2026-08, c8ac8e5)
 
 `validate_triggers`/`validate_spec` built `{ "event", "ft", "cmd", "keys" }`

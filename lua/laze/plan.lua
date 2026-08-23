@@ -5,6 +5,32 @@
 -- left by its predecessor instead of accumulating stale trigger closures.
 local installed_preloads = {}
 
+--- Return the plugin's pack directory if it is ALREADY on 'runtimepath',
+--- else nil. Mirrors the discovery glob below
+--- (`stdpath("data")/site/pack/*/opt/<pkg>`, lexicographically first match),
+--- so a hit here means the glob would have found the same install and the
+--- follow-up `:packadd` would be a no-op — skipping both saves an API
+--- roundtrip per already-active plugin (the common eager case: setup()
+--- activates them right before the plan runs).
+---@param rtp_entries string[]
+---@param data_dir string
+---@param pkg string
+---@return string?
+local function active_pack_dir(rtp_entries, data_dir, pkg)
+	local suffix = "/site/pack/"
+	local best
+	for i = 1, #rtp_entries do
+		local p = rtp_entries[i]
+		if p:sub(1, #data_dir) == data_dir then
+			local pack_name, dir_pkg = p:match("^([^/]+)/opt/(.+)$", #data_dir + #suffix + 1)
+			if pack_name and dir_pkg == pkg and (not best or p < best) then
+				best = p
+			end
+		end
+	end
+	return best
+end
+
 ---@param compiled LazeCompiled
 ---@param opts? { on_load?: fun(id: string, time_ms: number), on_fail?: fun(id: string, err: string) }
 ---@return LazePlan
@@ -14,6 +40,9 @@ local function build_plan(compiled, opts)
 	local on_fail = opts.on_fail
 	local registry = compiled.registry
 	local routes = compiled.routes
+	-- Resolved once per plan; load_plugin would otherwise pay an API
+	-- roundtrip per activation for a value that cannot change.
+	local data_dir = vim.fn.stdpath("data")
 	local loaded = {}
 	local startup_pending = {}
 	local startup_pending_order = {}
@@ -210,6 +239,14 @@ local function build_plan(compiled, opts)
 
 	local function load_with_deps(id)
 		if loaded[id] == true or loaded[id] == "failed" or loaded[id] == "pending_startup" then
+			return
+		end
+
+		-- Fast path: no `after` deps means no graph walk — the DFS below
+		-- would allocate stack/cursor tables only to pop once.
+		local entry = registry[id]
+		if not (entry and entry.after and entry.after[1]) then
+			load_plugin(id)
 			return
 		end
 
