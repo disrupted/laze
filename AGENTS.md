@@ -44,8 +44,8 @@ tests/benchmarks/          — Manual benchmarks (commands in docs/performance.m
 tests/profile/             — Manual profile harness with real plugins
 ```
 
-Types (LuaCATS) are defined in README: `LazeSpec`, `LazeCompiled`,
-`LazeEntry`, `LazeRoutes`, `LazePlan`.
+Types (LuaCATS) are defined in code: `lua/laze/init.lua` (`LazeSpec`,
+`LazeCompiled`, `LazeEntry`, `LazeRoutes`, `LazePlan`).
 
 ## Conventions
 
