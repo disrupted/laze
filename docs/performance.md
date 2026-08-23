@@ -14,6 +14,16 @@ walks. Items below are grouped by status.
 
 ## Resolved
 
+### plan.lua: per-plugin runtimepath rescan on the startup fast path — resolved (2026-08)
+
+The startup fast path called `nvim_list_runtime_paths()` and rescanned every
+entry for each plugin hitting it (`O(E × R)`). One pass now builds a
+closure-local `{ pkg → dir }` index on first use; plan-owned runtimepath
+mutations invalidate it, and misses keep the glob + `:packadd` fallback.
+Headless micro-bench (33 rtp entries, 15 fast-path lookups): 110.6 → 9.7 µs
+per startup. Staleness analysis, invalidation rules, and rejected
+alternatives: [rtp-index.md](rtp-index.md).
+
 ### plan.lua: redundant glob + `:packadd!` for already-active plugins — resolved (2026-08)
 
 `vim.pack.add(..., { load = false })` already runs `:packadd!` per eager

@@ -5,30 +5,30 @@
 -- left by its predecessor instead of accumulating stale trigger closures.
 local installed_preloads = {}
 
---- Return the plugin's pack directory if it is ALREADY on 'runtimepath',
---- else nil. Mirrors the discovery glob below
+--- Map every pack-plugin directory currently on 'runtimepath' to its pkg
+--- name (`{ [pkg]: dir }`). Mirrors the discovery glob below
 --- (`stdpath("data")/site/pack/*/opt/<pkg>`, lexicographically first match),
 --- so a hit here means the glob would have found the same install and the
 --- follow-up `:packadd` would be a no-op — skipping both saves an API
 --- roundtrip per already-active plugin (the common eager case: setup()
---- activates them right before the plan runs).
----@param rtp_entries string[]
+--- activates them right before the plan runs). One pass builds the whole
+--- map; lookups are O(1) instead of a fresh list + full rescan per plugin.
 ---@param data_dir string
----@param pkg string
----@return string?
-local function active_pack_dir(rtp_entries, data_dir, pkg)
+---@return table<string, string>
+local function build_rtp_index(data_dir)
+	local index = {}
+	local entries = vim.api.nvim_list_runtime_paths()
 	local suffix = "/site/pack/"
-	local best
-	for i = 1, #rtp_entries do
-		local p = rtp_entries[i]
+	for i = 1, #entries do
+		local p = entries[i]
 		if p:sub(1, #data_dir) == data_dir then
 			local pack_name, dir_pkg = p:match("^([^/]+)/opt/(.+)$", #data_dir + #suffix + 1)
-			if pack_name and dir_pkg == pkg and (not best or p < best) then
-				best = p
+			if pack_name and (not index[dir_pkg] or p < index[dir_pkg]) then
+				index[dir_pkg] = p
 			end
 		end
 	end
-	return best
+	return index
 end
 
 ---@param compiled LazeCompiled
@@ -43,6 +43,16 @@ local function build_plan(compiled, opts)
 	-- Resolved once per plan; load_plugin would otherwise pay an API
 	-- roundtrip per activation for a value that cannot change.
 	local data_dir = vim.fn.stdpath("data")
+	-- Startup fast-path cache: pkg -> opt dir already on 'runtimepath'.
+	-- Built lazily on first lookup and invalidated whenever this plan itself
+	-- mutates 'runtimepath' (the dir-plugin prepend and the fallback
+	-- :packadd! below — the only mutation sites in this module). A MISS is
+	-- always safe (glob + :packadd fallback); a stale HIT would require
+	-- external code removing a site/pack/*/opt/* dir from 'runtimepath'
+	-- mid-startup, which has no actor today. Closure-local ON PURPOSE:
+	-- reload_all() rebuilds the plan, so a fresh cache comes with it.
+	-- See docs/rtp-index.md for the full analysis.
+	local rtp_index = nil
 	local loaded = {}
 	local startup_pending = {}
 	local startup_pending_order = {}
@@ -196,6 +206,7 @@ local function build_plan(compiled, opts)
 			-- so a stale install sharing only the basename wins and the
 			-- user's dir is silently skipped (module-not-found with no hint).
 			vim.opt.rtp:prepend(entry.dir)
+			rtp_index = nil -- rtp mutated: rebuild the fast-path index on next use
 			if not during_startup then
 				-- Nothing sources these after startup (:packadd would have):
 				-- do it here or commands, maps and filetype detection never
@@ -208,11 +219,27 @@ local function build_plan(compiled, opts)
 			-- Pack plugins live in pack/<pkg>/opt/<pkg>: :packadd uses the
 			-- directory name (entry.pkg), which may differ from the registry
 			-- id for dotted repos ("which-key" vs "which-key.nvim").
-			local found = vim.fn.glob(vim.fn.stdpath("data") .. "/site/pack/*/opt/" .. entry.pkg, false, true)
-			plugin_dir = found[1]
-			if plugin_dir then
-				local cmd = during_startup and "packadd! " or "packadd "
-				pcall(vim.cmd, cmd .. vim.fn.fnameescape(entry.pkg))
+			-- Startup-only fast path: eager plugins were just activated by
+			-- setup()'s `vim.pack.add(..., { load = false })` (:packadd!,
+			-- no sourcing) — if the dir is already on 'runtimepath', the
+			-- discovery glob and the redundant :packadd! are skippable; the
+			-- startup plugin/ phase does the sourcing either way.
+			-- Post-startup this does NOT apply: :packadd (no bang) sources
+			-- plugin/ here, skipping it would leave the plugin unsourced.
+			if during_startup then
+				rtp_index = rtp_index or build_rtp_index(data_dir)
+				plugin_dir = rtp_index[entry.pkg]
+			end
+			if not plugin_dir then
+				local found = vim.fn.glob(data_dir .. "/site/pack/*/opt/" .. entry.pkg, false, true)
+				plugin_dir = found[1]
+				if plugin_dir then
+					local cmd = during_startup and "packadd! " or "packadd "
+					pcall(vim.cmd, cmd .. vim.fn.fnameescape(entry.pkg))
+					-- A successful packadd puts a new opt dir on 'runtimepath';
+					-- drop the index so later lookups can see it.
+					rtp_index = nil
+				end
 			end
 		end
 
