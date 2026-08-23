@@ -34,7 +34,7 @@ local LAZY_NVIM_FIELDS = {
 	dependencies = "LazySpec[] — always lazy-loaded unless specified otherwise",
 	enabled = "boolean|fun():boolean",
 	cond = "boolean|fun(LazyPlugin):boolean",
-	priority = "number — start-plugin load order, default 50",
+	priority = "number — start-plugin load order (higher first), default 50",
 	-- Spec Setup
 	init = "fun(LazyPlugin) — always executed during startup",
 	opts = "table|fun(LazyPlugin, opts) — implies config()",
@@ -180,7 +180,7 @@ local notes = {
 	"version: lazy.nvim = semver range (a string like '*' or '>=2.0.0', or false). laze maps version/branch/tag/commit into ONE vim.pack version field (commit > tag > branch). branch/tag/commit all exist in lazy.nvim too.",
 	"config = true: valid in lazy.nvim (implies opts support); laze raises a clear error instead of silently misbehaving — safe direction.",
 	"build: lazy.nvim accepts false (skip build) and a list of commands. laze accepts false (no-op, same as omitting it) and a single string/function; the list form is rejected with a compile error — safe direction.",
-	"priority: consumed and stored in the registry but NOT used for ordering — laze loads in spec order. lazy.nvim reorders start plugins by priority.",
+	"priority: honored for eager ordering — eager plugins load highest-first with id as tie-break, matching lazy.nvim's start-plugin reordering. Dependencies (`after`) never order eagerly: they load via their parents.",
 	"keys entries: laze keeps lhs/rhs/mode/desc/silent; other vim.keymap.set options (noremap, nowait, expr, callback, buffer) are silently dropped.",
 	"function-shaped triggers (event/cmd/ft/keys = fun(self, list)): valid in lazy.nvim (evaluated at startup). laze REJECTS them with a compile error — silently ignoring them would turn the plugin eager. Rejecting is the safe direction: a laze config never contains them, and migrating laze → lazy.nvim is unaffected.",
 	"keys mode: laze accepts mode = string | string[] ('n','v',...); lazy.nvim's LazyKeysSpec mode also accepts a mode table. Shared shape.",

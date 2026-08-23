@@ -98,6 +98,7 @@ Supported fields:
 * `dependencies`
 * `module` — module name(s) that trigger lazy load on `require`
 * `build` — build command or function (passed to `vim.pack`)
+* `priority` — eager plugin load order: higher loads first, tie-break by id (default 50)
 * `dev_path` — local path for dev mode (used by your own commands)
 
 Accepted value shapes:
