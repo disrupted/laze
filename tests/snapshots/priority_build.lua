@@ -1,0 +1,118 @@
+local FN = require("tests.fixtures._sentinel").FN
+
+return {
+	pack = {
+		{
+			name = "colorscheme",
+			src = "https://github.com/user/colorscheme",
+		},
+		{
+			name = "default-plugin",
+			src = "https://github.com/user/default-plugin",
+		},
+		{
+			name = "low-priority",
+			src = "https://github.com/user/low-priority",
+		},
+		{
+			name = "no-build",
+			src = "https://github.com/user/no-build",
+		},
+		{
+			build = "make",
+			name = "build-str",
+			src = "https://github.com/user/build-str",
+		},
+		{
+			build = FN,
+			name = "build-fn",
+			src = "https://github.com/user/build-fn",
+		},
+	},
+	registry = {
+		["build-fn"] = {
+			after = {},
+			build = FN,
+			enabled = true,
+			has_route = true,
+			id = "build-fn",
+			is_dep = false,
+			pkg = "build-fn",
+			priority = 50,
+			silent = false,
+			src = "https://github.com/user/build-fn",
+		},
+		["build-str"] = {
+			after = {},
+			build = "make",
+			enabled = true,
+			has_route = true,
+			id = "build-str",
+			is_dep = false,
+			pkg = "build-str",
+			priority = 50,
+			silent = false,
+			src = "https://github.com/user/build-str",
+		},
+		colorscheme = {
+			after = {},
+			enabled = true,
+			has_route = false,
+			id = "colorscheme",
+			is_dep = false,
+			pkg = "colorscheme",
+			priority = 100,
+			silent = false,
+			src = "https://github.com/user/colorscheme",
+		},
+		["default-plugin"] = {
+			after = {},
+			enabled = true,
+			has_route = false,
+			id = "default-plugin",
+			is_dep = false,
+			pkg = "default-plugin",
+			priority = 50,
+			silent = false,
+			src = "https://github.com/user/default-plugin",
+		},
+		["low-priority"] = {
+			after = {},
+			enabled = true,
+			has_route = true,
+			id = "low-priority",
+			is_dep = false,
+			pkg = "low-priority",
+			priority = 1,
+			silent = false,
+			src = "https://github.com/user/low-priority",
+		},
+		["no-build"] = {
+			after = {},
+			enabled = true,
+			has_route = true,
+			id = "no-build",
+			is_dep = false,
+			pkg = "no-build",
+			priority = 50,
+			silent = false,
+			src = "https://github.com/user/no-build",
+		},
+	},
+	routes = {
+		cmds = {},
+		events = {
+			VeryLazy = {
+				ids = {
+					"low-priority",
+					"no-build",
+					"build-str",
+					"build-fn",
+				},
+			},
+		},
+		fts = {},
+		keys = {},
+		modules = {},
+	},
+}

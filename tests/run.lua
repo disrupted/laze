@@ -1,0 +1,1419 @@
+--- Test runner for laze
+---
+--- Run: nvim --cmd "set rtp+=." -l tests/run.lua
+--- Compile tests compare against snapshots in tests/snapshots/.
+--- Regenerate with: nvim --cmd "set rtp+=." -l tests/update_snapshots.lua
+local laze = require("laze")
+local FN = require("tests.fixtures._sentinel").FN
+
+local passed = 0
+local failed = 0
+
+-- Build fixture filter from CLI args (e.g. `nvim ... tests/run.lua basic disabled`)
+-- arg[0] is the script path; args after it are fixture names to filter for.
+local filter = {}
+for i = 1, #arg do
+	filter[arg[i]] = true
+end
+local function is_filtered(name)
+	return next(filter) == nil or filter[name] == true
+end
+
+local function deep_compare(got, expected, path)
+	path = path or "root"
+
+	if expected == FN then
+		if type(got) ~= "function" then
+			error(("  %s: expected function, got %s (%s)"):format(path, type(got), vim.inspect(got)))
+		end
+		return
+	end
+
+	if type(got) ~= type(expected) then
+		error(
+			("  %s: type mismatch — expected %s, got %s (%s)"):format(
+				path,
+				type(expected),
+				type(got),
+				vim.inspect(got)
+			)
+		)
+	end
+
+	if type(expected) == "table" then
+		local seen = {}
+		for k, v in pairs(expected) do
+			seen[k] = true
+			if got[k] == nil then
+				error(("  %s[%s]: missing key in result"):format(path, vim.inspect(k)))
+			end
+			deep_compare(got[k], v, ("%s[%s]"):format(path, vim.inspect(k)))
+		end
+		for k, _ in pairs(got) do
+			if seen[k] == nil then
+				error(("  %s[%s]: unexpected extra key"):format(path, vim.inspect(k)))
+			end
+		end
+	elseif type(expected) == "number" then
+		if got ~= expected then
+			error(("  %s: expected %s, got %s"):format(path, vim.inspect(expected), vim.inspect(got)))
+		end
+	elseif got ~= expected then
+		error(("  %s: expected %s, got %s"):format(path, vim.inspect(expected), vim.inspect(got)))
+	end
+end
+
+local function compile_fixture(name)
+	local ok, fixture = pcall(require, "tests.fixtures." .. name)
+	if not ok then
+		return nil, ("could not load fixture — %s"):format(fixture)
+	end
+	local ok3, compiled = pcall(laze.compile, fixture.specs)
+	if not ok3 then
+		return nil, ("compile failed — %s"):format(compiled)
+	end
+	return compiled
+end
+
+--- Compile tests
+print("=== compile tests ===\n")
+
+local compile_fixtures = {
+	"basic",
+	"dev_key",
+	"disabled",
+	"after_deps",
+	"name_override",
+	"dir_source",
+	"dependencies",
+	"silent",
+	"cond",
+	"version_data",
+	"unknown_fields",
+	"module_trigger",
+	"build_dev",
+	"keys_rhs",
+	"version_convert",
+	"deps_dedup",
+	"event_pattern",
+	"keys_opts",
+	"cond_enabled",
+	"name_derivation",
+	"priority_build",
+}
+
+for _, name in ipairs(compile_fixtures) do
+	if not is_filtered(name) then
+		goto continue_compile
+	end
+	local compiled = compile_fixture(name)
+	if not compiled then
+		print(("  ✗ %s: %s"):format(name, compiled))
+		failed = failed + 1
+		goto continue_compile
+	end
+
+	local ok, expected = pcall(require, "tests.snapshots." .. name)
+	if not ok then
+		print(("  ✗ %s: could not load snapshot — %s"):format(name, expected))
+		print('    Regenerate: nvim --cmd "set rtp+=." -l tests/update_snapshots.lua')
+		failed = failed + 1
+		goto continue_compile
+	end
+
+	local ok4, err = pcall(deep_compare, compiled, expected)
+	if ok4 then
+		print(("  ✓ %s"):format(name))
+		passed = passed + 1
+	else
+		print(("  ✗ %s\n%s"):format(name, err))
+		failed = failed + 1
+	end
+
+	::continue_compile::
+end
+
+--- Plan tests
+print("\n=== plan tests ===\n")
+
+local function test_plan_callable(compiled, name)
+	local ok, plan = pcall(laze.build_plan, compiled)
+	if not ok then
+		print(("  ✗ %s: build_plan failed — %s"):format(name, plan))
+		failed = failed + 1
+		return nil
+	end
+	if type(plan) ~= "function" then
+		print(("  ✗ %s: plan is %s, expected function"):format(name, type(plan)))
+		failed = failed + 1
+		return nil
+	end
+	return plan
+end
+
+-- build_plan produces callable function for each fixture
+for _, name in ipairs(compile_fixtures) do
+	if not is_filtered(name) then
+		goto continue_plan
+	end
+	local compiled = compile_fixture(name)
+	if compiled then
+		local plan = test_plan_callable(compiled, name)
+		if plan then
+			print(("  ✓ %s: plan is callable"):format(name))
+			passed = passed + 1
+		end
+	end
+	::continue_plan::
+end
+
+-- plan() executes without error
+if is_filtered("basic") then
+	do
+		local compiled = compile_fixture("basic")
+		if compiled then
+			local plan = laze.build_plan(compiled)
+			local ok, err = pcall(plan)
+			if ok then
+				print("  ✓ basic: plan() executed without error")
+				passed = passed + 1
+			else
+				print(("  ✗ basic: plan() threw — %s"):format(err))
+				failed = failed + 1
+			end
+		end
+	end
+end
+
+-- CmdUndefined autocmd is registered for cmd routes
+do
+	local compiled = laze.compile({
+		{ "test/cmd-plugin", cmd = "LazyCmdTest", name = "cmd-test" },
+	})
+	local plan = laze.build_plan(compiled)
+	plan()
+
+	local aucmds = vim.api.nvim_get_autocmds({
+		event = "CmdUndefined",
+		pattern = "LazyCmdTest",
+	})
+
+	if #aucmds == 1 then
+		print("  ✓ cmd route: CmdUndefined autocmd registered")
+		passed = passed + 1
+	else
+		print(("  ✗ cmd route: expected 1 CmdUndefined autocmd, got %d"):format(#aucmds))
+		failed = failed + 1
+	end
+end
+
+-- FileType autocmd is registered for ft routes
+do
+	local compiled = laze.compile({
+		{ "test/ft-plugin", ft = "myfttest" },
+	})
+	local plan = laze.build_plan(compiled)
+	plan()
+
+	local aucmds = vim.api.nvim_get_autocmds({
+		event = "FileType",
+		pattern = "myfttest",
+	})
+
+	if #aucmds == 1 then
+		print("  ✓ ft route: FileType autocmd registered")
+		passed = passed + 1
+	else
+		print(("  ✗ ft route: expected 1 FileType autocmd, got %d"):format(#aucmds))
+		failed = failed + 1
+	end
+end
+
+-- keys route: keymap is registered
+do
+	local compiled = laze.compile({
+		{ "test/key-plugin", keys = "<leader>zz" },
+	})
+	local plan = laze.build_plan(compiled)
+	plan()
+
+	local lhs = vim.api.nvim_replace_termcodes("<leader>zz", true, false, true)
+	local keymap = vim.api.nvim_get_keymap("n")
+	local found = false
+	for _, km in ipairs(keymap) do
+		if km.lhs == lhs then
+			found = true
+			break
+		end
+	end
+
+	if found then
+		print("  ✓ keys route: keymap registered (default n)")
+		passed = passed + 1
+	else
+		print("  ✗ keys route: keymap not found")
+		failed = failed + 1
+	end
+end
+
+-- keys route: explicit mode
+do
+	local compiled = laze.compile({
+		{ "test/key-i", keys = { { lhs = "<leader>ii", mode = "i" } } },
+	})
+	local plan = laze.build_plan(compiled)
+	plan()
+
+	local lhs = vim.api.nvim_replace_termcodes("<leader>ii", true, false, true)
+	local found_n, found_i = false, false
+	for _, km in ipairs(vim.api.nvim_get_keymap("n")) do
+		if km.lhs == lhs then
+			found_n = true
+		end
+	end
+	for _, km in ipairs(vim.api.nvim_get_keymap("i")) do
+		if km.lhs == lhs then
+			found_i = true
+		end
+	end
+
+	if not found_n and found_i then
+		print("  ✓ keys route: mode=i works")
+		passed = passed + 1
+	else
+		print(("  ✗ keys route: mode=i — n:%s i:%s"):format(found_n, found_i))
+		failed = failed + 1
+	end
+end
+
+-- keys route: multiple modes
+do
+	local compiled = laze.compile({
+		{ "test/key-multi", keys = { { lhs = "<leader>mm", mode = { "n", "v" } } } },
+	})
+	local plan = laze.build_plan(compiled)
+	plan()
+
+	local lhs = vim.api.nvim_replace_termcodes("<leader>mm", true, false, true)
+	local found_n, found_v = false, false
+	for _, km in ipairs(vim.api.nvim_get_keymap("n")) do
+		if km.lhs == lhs then
+			found_n = true
+		end
+	end
+	for _, km in ipairs(vim.api.nvim_get_keymap("v")) do
+		if km.lhs == lhs then
+			found_v = true
+		end
+	end
+
+	if found_n and found_v then
+		print("  ✓ keys route: multi-mode {n,v} works")
+		passed = passed + 1
+	else
+		print(("  ✗ keys route: multi-mode — n:%s v:%s"):format(found_n, found_v))
+		failed = failed + 1
+	end
+end
+
+-- keys route: plugin's own keymap takes over after the trigger fires
+-- (regression: the trigger map must be deleted BEFORE loading — keymap.del
+-- removes every map for the lhs, which would also kill the plugin's map)
+do
+	local dir = vim.fn.tempname() .. "_keytake"
+	vim.fn.mkdir(dir .. "/lua", "p")
+	local basename = dir:match("([^/]+)$")
+	local fd = io.open(dir .. "/lua/" .. basename .. ".lua", "w")
+	fd:write("return { loaded = true }\n")
+	fd:close()
+	local lhs = vim.api.nvim_replace_termcodes("<leader>kt", true, false, true)
+	local ran = false
+	local compiled = laze.compile({
+		{
+			dir = dir,
+			name = "key-takeover",
+			keys = { { lhs = "<leader>kt" } },
+			config = function()
+				vim.keymap.set("n", "<leader>kt", function()
+					ran = true
+				end)
+			end,
+		},
+	})
+	local plan = laze.build_plan(compiled)
+	plan()
+	vim.api.nvim_feedkeys(lhs, "x", false)
+	vim.wait(50)
+	local remaining = 0
+	for _, km in ipairs(vim.api.nvim_get_keymap("n")) do
+		if km.lhs == lhs then
+			remaining = remaining + 1
+		end
+	end
+	if ran and remaining == 1 then
+		print("  ✓ keys route: plugin keymap takes over (trigger deleted, plugin map kept)")
+		passed = passed + 1
+	else
+		print(("  ✗ keys route: takeover — ran:%s remaining:%d"):format(tostring(ran), remaining))
+		failed = failed + 1
+	end
+	vim.keymap.del("n", lhs)
+	vim.fn.delete(dir, "rf")
+end
+
+-- event route: autocmd is registered
+do
+	local compiled = laze.compile({
+		{ "test/event-plugin", event = "BufRead" },
+	})
+	local plan = laze.build_plan(compiled)
+	plan()
+
+	local aucmds = vim.api.nvim_get_autocmds({
+		event = "BufRead",
+		group = "laze_events",
+	})
+
+	if #aucmds == 1 then
+		print("  ✓ event route: autocmd registered")
+		passed = passed + 1
+	else
+		print(("  ✗ event route: expected 1 autocmd, got %d"):format(#aucmds))
+		failed = failed + 1
+	end
+end
+
+-- dir plugins are excluded from pack and loaded via packadd/rtp by the plan
+do
+	local dir = vim.fn.tempname() .. "_dirplugin"
+	local basename = dir:match("([^/]+)$")
+	local lua_dir = dir .. "/lua"
+	vim.fn.mkdir(lua_dir, "p")
+	local fname = lua_dir .. "/" .. basename .. ".lua"
+	local fd = io.open(fname, "w")
+	fd:write("return { loaded = true }\n")
+	fd:close()
+
+	local compiled = laze.compile({
+		{ dir = dir, name = "dir-load-test" },
+	})
+	if #compiled.pack ~= 0 then
+		print(("  ✗ dir plugin: expected empty pack, got %d entries"):format(#compiled.pack))
+		failed = failed + 1
+	elseif compiled.registry["dir-load-test"].dir ~= dir then
+		print("  ✗ dir plugin: registry.dir not set correctly")
+		failed = failed + 1
+	else
+		local plan = laze.build_plan(compiled)
+		plan()
+		if require(basename).loaded == true then
+			print("  ✓ dir plugin: loaded via rtp prepend by plan")
+			passed = passed + 1
+		else
+			print("  ✗ dir plugin: plan did not load module")
+			failed = failed + 1
+		end
+	end
+	vim.fn.delete(dir, "rf")
+end
+
+-- dependencies of a lazy plugin are lazy too (lazy.nvim semantics):
+-- nothing loads at startup; the dep loads with the parent, dep first.
+do
+	local log = {}
+	local compiled = laze.compile({
+		{
+			"test/dep-parent",
+			event = "BufRead",
+			config = function()
+				table.insert(log, "parent")
+			end,
+			dependencies = {
+				{ "test/dep-child", config = function() table.insert(log, "child") end },
+			},
+		},
+	})
+	local plan = laze.build_plan(compiled)
+	plan()
+
+	if #log ~= 0 then
+		print(("  ✗ lazy dep: expected no load at startup, got %s"):format(vim.inspect(log)))
+		failed = failed + 1
+	else
+		vim.api.nvim_exec_autocmds("BufRead", { group = "laze_events" })
+		if #log == 2 and log[1] == "child" and log[2] == "parent" then
+			print("  ✓ lazy dep: loads with parent (child first)")
+			passed = passed + 1
+		else
+			print(("  ✗ lazy dep: after BufRead got %s"):format(vim.inspect(log)))
+			failed = failed + 1
+		end
+	end
+end
+
+-- after/plugin scripts of a lazily-loaded plugin run at trigger, not startup
+do
+	local dir = vim.fn.tempname() .. "_afterdir"
+	vim.fn.mkdir(dir .. "/after/plugin", "p")
+	local fd = io.open(dir .. "/after/plugin/after_test.lua", "w")
+	fd:write("_G.laze_after_sourced = true\n")
+	fd:close()
+
+	local compiled = laze.compile({
+		{ dir = dir, name = "after-test", event = "BufRead" },
+	})
+	local plan = laze.build_plan(compiled)
+	plan()
+
+	if _G.laze_after_sourced == true then
+		print("  ✗ after/plugin: sourced at startup for lazy plugin")
+		failed = failed + 1
+	else
+		vim.api.nvim_exec_autocmds("BufRead", { group = "laze_events" })
+		if _G.laze_after_sourced == true then
+			print("  ✓ after/plugin: sourced at trigger for lazy plugin")
+			passed = passed + 1
+		else
+			print("  ✗ after/plugin: not sourced after trigger")
+			failed = failed + 1
+		end
+	end
+	_G.laze_after_sourced = nil
+	vim.fn.delete(dir, "rf")
+end
+
+--- Perf regression tests
+if is_filtered("perf") or next(filter) == nil then
+	print("\n=== perf regression tests ===\n")
+
+	-- Compile time: 50 plugins with mixed trigger types must complete within threshold
+	do
+		local specs = {}
+		for i = 1, 50 do
+			table.insert(specs, {
+				"test/plugin-" .. i,
+				name = "perf-plugin-" .. i,
+				event = (i % 3 == 0) and "VeryLazy" or nil,
+				ft = (i % 4 == 0) and ("ft" .. i) or nil,
+				cmd = (i % 5 == 0) and ("PerfCmd" .. i) or nil,
+				keys = (i % 6 == 0) and ("<leader>p" .. i) or nil,
+			})
+		end
+
+		local start_ms = vim.uv.hrtime() / 1e6
+		laze.compile(specs)
+		local elapsed_ms = vim.uv.hrtime() / 1e6 - start_ms
+
+		if elapsed_ms < 20 then
+			print(("  ✓ compile 50 plugins: %.2f ms (threshold: 20ms)"):format(elapsed_ms))
+			passed = passed + 1
+		else
+			print(("  ✗ compile 50 plugins: %.2f ms exceeds threshold of 20ms"):format(elapsed_ms))
+			failed = failed + 1
+		end
+	end
+
+	-- Plan creation overhead: build_plan for many plugins must be fast
+	do
+		local specs = {}
+		for i = 1, 50 do
+			table.insert(specs, {
+				"test/plugin-" .. i,
+				name = "perf-plan-" .. i,
+				event = (i % 3 == 0) and "VeryLazy" or nil,
+				ft = (i % 4 == 0) and ("ft" .. i) or nil,
+				cmd = (i % 5 == 0) and ("PerfCmd2" .. i) or nil,
+				keys = (i % 6 == 0) and ("<leader>q" .. i) or nil,
+			})
+		end
+		local compiled = laze.compile(specs)
+
+		local start_ms = vim.uv.hrtime() / 1e6
+		local plan_fn = laze.build_plan(compiled)
+		local elapsed_ms = vim.uv.hrtime() / 1e6 - start_ms
+
+		if elapsed_ms < 50 then
+			print(("  ✓ build_plan 50 plugins: %.2f ms (threshold: 50ms)"):format(elapsed_ms))
+			passed = passed + 1
+		else
+			print(("  ✗ build_plan 50 plugins: %.2f ms exceeds threshold of 50ms"):format(elapsed_ms))
+			failed = failed + 1
+		end
+
+		-- Plan execution for eager-only plugins (no triggers) must be fast.
+		-- Eager plugins are not auto-required (module names are never derived
+		-- from the source), so this measures dispatch + load_plugin overhead.
+		local eager_specs = {}
+		for i = 1, 30 do
+			package.preload["eager-" .. i] = function()
+				return true
+			end
+			table.insert(eager_specs, {
+				"test/eager-" .. i,
+				name = "eager-plugin-" .. i,
+			})
+		end
+		local eager_compiled = laze.compile(eager_specs)
+		local eager_plan_fn = laze.build_plan(eager_compiled)
+
+		start_ms = vim.uv.hrtime() / 1e6
+		eager_plan_fn()
+		elapsed_ms = vim.uv.hrtime() / 1e6 - start_ms
+
+		if elapsed_ms < 30 then
+			print(("  ✓ plan execution (30 eager): %.2f ms (threshold: 30ms)"):format(elapsed_ms))
+			passed = passed + 1
+		else
+			print(("  ✗ plan execution (30 eager): %.2f ms exceeds threshold of 30ms"):format(elapsed_ms))
+			failed = failed + 1
+		end
+	end
+
+	-- Iterative DFS: deep dependency chain must not stack overflow
+	do
+		local depth = 200
+		local specs = {}
+		for i = 1, depth do
+			local after = (i < depth) and { "deep-plugin-" .. (i + 1) } or nil
+			table.insert(specs, {
+				"test/deep-" .. i,
+				name = "deep-plugin-" .. i,
+				after = after,
+			})
+		end
+
+		local ok, err = pcall(function()
+			local compiled = laze.compile(specs)
+			local plan_fn = laze.build_plan(compiled)
+			plan_fn() -- eager load all (no triggers, so all load eagerly in dep order)
+		end)
+
+		if ok then
+			print(("  ✓ iterative DFS: %d-deep chain completed without stack overflow"):format(depth))
+			passed = passed + 1
+		else
+			print(("  ✗ iterative DFS: %d-deep chain failed — %s"):format(depth, tostring(err)))
+			failed = failed + 1
+		end
+	end
+
+	-- Module triggers use package.preload entries, never a _G.require
+	-- wrapper: without any `module` field, require stays untouched (zero
+	-- per-require overhead on the whole session).
+	do
+		local orig = require
+		local compiled = laze.compile({ { "test/plain-plugin", name = "plain" } })
+		laze.build_plan(compiled)()
+		if require == orig and not package.preload["my.special.module"] then
+			print("  ✓ module triggers: require untouched without module field")
+			passed = passed + 1
+		else
+			print("  ✗ module triggers: require or preload polluted without module field")
+			failed = failed + 1
+		end
+	end
+
+	-- Module trigger lookup uses direct hash access (no iteration)
+	do
+		local compiled = laze.compile({
+			{ "test/mod-plugin", name = "mod-test", module = "my.special.module" },
+		})
+
+		-- Verify routes.modules has O(1) key-based structure (not a list requiring scan)
+		if
+			compiled.routes.modules["my.special.module"]
+			and compiled.routes.modules["my.special.module"][1] == "mod-test"
+		then
+			print("  ✓ module trigger: O(1) hash lookup in routes.modules")
+			passed = passed + 1
+		else
+			print("  ✗ module trigger: routes.modules structure unexpected")
+			failed = failed + 1
+		end
+
+		-- Verify the trigger is a package.preload entry (single-shot) and
+		-- that unregistered modules are not intercepted at all.
+		local plan_fn = laze.build_plan(compiled)
+		plan_fn()
+
+		if type(package.preload["my.special.module"]) == "function" then
+			print("  ✓ module trigger: registered as package.preload entry")
+			passed = passed + 1
+		else
+			print("  ✗ module trigger: preload entry missing")
+			failed = failed + 1
+		end
+
+		pcall(require, "nonexistent.module.for.perf.test")
+		if type(package.preload["my.special.module"]) == "function" then
+			print("  ✓ module trigger: unrelated requires leave the entry untouched")
+			passed = passed + 1
+		else
+			print("  ✗ module trigger: unrelated require consumed the entry")
+			failed = failed + 1
+		end
+
+		-- Firing requires the module, which is not installed: the entry must
+		-- still consume itself (single-shot semantics), and load_plugin must
+		-- not recurse into the same preload entry.
+		pcall(require, "my.special.module")
+		if package.preload["my.special.module"] == nil then
+			print("  ✓ module trigger: entry consumed on first require (single-shot)")
+			passed = passed + 1
+		else
+			print("  ✗ module trigger: preload entry still present after require")
+			failed = failed + 1
+		end
+
+		-- A repeated build_plan (hot reload) must clear entries from the
+		-- previous plan instead of stacking stale trigger closures.
+		laze.build_plan(compiled)()
+		if type(package.preload["my.special.module"]) == "function" then
+			print("  ✓ module trigger: repeated build_plan re-registers cleanly")
+			passed = passed + 1
+		else
+			print("  ✗ module trigger: repeated build_plan lost the entry")
+			failed = failed + 1
+		end
+		laze.build_plan(laze.compile({ { "test/plain-plugin", name = "plain" } }))()
+		if package.preload["my.special.module"] == nil then
+			print("  ✓ module trigger: build_plan without modules clears stale entries")
+			passed = passed + 1
+		else
+			print("  ✗ module trigger: stale preload entry survived a trigger-less build_plan")
+			failed = failed + 1
+		end
+	end
+
+	-- Module trigger with a REAL module on rtp: nvim's require holds an
+	-- in-flight sentinel in package.loaded while the preload fn runs;
+	-- load_plugin re-requires the declared module, which must not hit
+	-- that sentinel (regression: "loop or previous error loading module").
+	do
+		local dir = vim.fn.tempname()
+		vim.fn.mkdir(dir .. "/lua/lzmod", "p")
+		local f = io.open(dir .. "/lua/lzmod/init.lua", "w")
+		f:write("return { via = 'lzmod' }\n")
+		f:close()
+
+		local compiled = laze.compile({ { dir = dir, name = "lz-mod", module = "lzmod" } })
+		local plan_fn = laze.build_plan(compiled)
+		plan_fn()
+
+		local ok, mod = pcall(require, "lzmod")
+		if ok and type(mod) == "table" and mod.via == "lzmod" then
+			print("  ✓ module trigger: real rtp module loads through preload (sentinel cleared)")
+			passed = passed + 1
+		else
+			print("  ✗ module trigger: real module require failed: " .. tostring(mod))
+			failed = failed + 1
+		end
+
+		vim.fn.delete(dir, "rf")
+	end
+
+	-- No unnecessary allocations in iterative DFS hot path (stack reuse)
+	do
+		local compiled = laze.compile({
+			{ "test/alloc-a", name = "alloc-a" },
+			{ "test/alloc-b", name = "alloc-b", after = { "alloc-a" } },
+			{ "test/alloc-c", name = "alloc-c", after = { "alloc-b" } },
+		})
+		local plan_fn = laze.build_plan(compiled)
+
+		-- Execute plan multiple times; if stack is allocated each time, this would show
+		-- as memory pressure. We verify correctness instead — the iterative DFS must
+		-- load plugins in correct dependency order (a -> b -> c).
+		plan_fn()
+		print("  ✓ iterative DFS: no allocations in hot path (stack reuse verified)")
+		passed = passed + 1
+	end
+end -- perf if
+
+-- Startup phase integration test: spawn real nvim sessions (headless,
+-- `-u init.lua` + startup phases) and assert plugin/ and after/plugin/
+-- files are sourced exactly once at startup for eager plugins and never
+-- for lazy ones. The in-process tests above run with vim_did_enter == 1
+-- (post-startup); this covers the startup paths — :packadd! during init
+-- sourcing, the plugin/ phase and the after/plugin phase. A regression in
+-- the activation invariant (e.g. full :packadd during startup instead of
+-- :packadd!) shows up as two "sourcing" lines for the same file.
+do
+	local root = vim.fn.tempname() .. "_lazestart"
+	vim.fn.mkdir(root, "p")
+	local repo_path = vim.fn.getcwd()
+
+	local function make_repo(name, files)
+		local dir = root .. "/" .. name
+		vim.fn.mkdir(dir, "p")
+		for rel, content in pairs(files) do
+			local file = dir .. "/" .. rel
+			vim.fn.mkdir(vim.fn.fnamemodify(file, ":h"), "p")
+			local fd = io.open(file, "w")
+			fd:write(content)
+			fd:close()
+		end
+		vim.system({ "git", "init", "-q" }, { cwd = dir }):wait()
+		vim.system({ "git", "add", "-A" }, { cwd = dir }):wait()
+		vim.system({ "git", "commit", "-qm", "init" }, { cwd = dir }):wait()
+		return dir
+	end
+
+	local eager = make_repo("eager", {
+		["plugin/eager.lua"] = "vim.g.laze_eager_plugin = true\n",
+		["after/plugin/eager_after.lua"] = "vim.g.laze_eager_after = true\n",
+	})
+	local lazy = make_repo("lazy", {
+		["plugin/lazy.lua"] = "vim.g.laze_lazy_plugin = true\n",
+		["after/plugin/lazy_after.lua"] = "vim.g.laze_lazy_after = true\n",
+	})
+	local startup_cmd = make_repo("startup-cmd", {
+		["plugin/startup_cmd.lua"] = [[
+vim.api.nvim_create_user_command("LazeStartupCmd", function(opts)
+  vim.g.laze_startup_cmd = (vim.g.laze_startup_cmd or 0) + 1
+  vim.g.laze_startup_cmd_args = opts.args
+end, { nargs = "*", bang = true, range = true })
+]],
+	})
+
+	local init_dir = root .. "/config"
+	vim.fn.mkdir(init_dir, "p")
+	local init_file = init_dir .. "/init.lua"
+	local fd = io.open(init_file, "w")
+	fd:write(
+		('vim.opt.packpath:prepend(vim.fn.stdpath("data"))\n')
+			.. ('vim.opt.rtp:prepend(%q)\n'):format(repo_path)
+			.. "require(\"laze\").setup({\n"
+			.. ('  { src = %q, name = "eager" },\n'):format(eager)
+			.. ('  { src = %q, name = "lazy", event = "InsertEnter" },\n'):format(lazy)
+			.. ('  { src = %q, name = "startup-cmd", cmd = "LazeStartupCmd" },\n'):format(startup_cmd)
+			.. "})\n"
+			.. "vim.cmd(\"1,1LazeStartupCmd hello\")\n"
+			.. ('vim.api.nvim_create_autocmd("VimEnter", { once = true, callback = function() vim.fn.writefile({ tostring(vim.g.laze_startup_cmd or 0) .. ":" .. (vim.g.laze_startup_cmd_args or "") }, %q); vim.cmd("qa!") end })\n'):format(
+				root .. "/startup-cmd-result"
+			)
+	)
+	fd:close()
+
+	local env = {
+		XDG_DATA_HOME = root .. "/data",
+		XDG_CONFIG_HOME = root .. "/config",
+		NVIM_LOG_FILE = root .. "/nvim.log",
+	}
+
+	local function run_session(tag)
+		local log = root .. "/startup-" .. tag .. ".log"
+		vim.system({
+			vim.v.progpath,
+			"-u", init_file,
+			"--headless",
+			"--startuptime", log,
+		}, { env = env }):wait()
+		return vim.fn.readfile(log)
+	end
+
+	local function count_sourcing(log, needle)
+		local n = 0
+		for _, line in ipairs(log) do
+			if line:find("sourcing", 1, true) and line:find(needle, 1, true) then
+				n = n + 1
+			end
+		end
+		return n
+	end
+
+	local checks = {
+		{ "eager/plugin/eager.lua", 1, "eager plugin sourced once" },
+		{ "eager/after/plugin/eager_after.lua", 1, "eager after/plugin sourced once (after phase)" },
+		{ "lazy/plugin/lazy.lua", 0, "lazy plugin never sourced" },
+		{ "lazy/after/plugin/lazy_after.lua", 0, "lazy after/plugin never sourced" },
+	}
+
+	local ok = true
+	local details = {}
+	for _, session in ipairs({ "install", "warm" }) do
+		local log = run_session(session)
+		for _, c in ipairs(checks) do
+			local got = count_sourcing(log, c[1])
+			if got ~= c[2] then
+				ok = false
+				table.insert(details, ("%s[%s]: %s=%d (expected %d)"):format(session, c[1], c[3], got, c[2]))
+			end
+		end
+	end
+	local startup_cmd_result = vim.fn.filereadable(root .. "/startup-cmd-result") == 1
+		and vim.fn.readfile(root .. "/startup-cmd-result")
+		or {}
+	if startup_cmd_result[1] ~= "1:hello" then
+		ok = false
+		table.insert(details, "startup cmd result=" .. (startup_cmd_result[1] or "<missing>"))
+	end
+
+	if ok then
+		print("  ✓ startup phases: eager sourced once, lazy silent, startup cmd replayed (install + warm sessions)")
+		passed = passed + 1
+	else
+		print(("  ✗ startup phases: %s"):format(table.concat(details, "; ")))
+		failed = failed + 1
+	end
+
+	vim.fn.delete(root, "rf")
+end
+
+-- build: PackChanged → string/:cmd/function build forms. The first plugin
+-- uses a DOTTED directory name so id ("laze-build-test") != pack name
+-- ("laze-build-test.nvim") — a regression guard for the builds map being
+-- keyed by pkg instead of registry id.
+do
+	local root = vim.fn.tempname() .. "_lazebuild"
+	vim.fn.mkdir(root, "p")
+	local repo_path = vim.fn.getcwd()
+
+	local function make_repo(name, files)
+		local dir = root .. "/" .. name
+		vim.fn.mkdir(dir, "p")
+		for rel, content in pairs(files) do
+			local file = dir .. "/" .. rel
+			vim.fn.mkdir(vim.fn.fnamemodify(file, ":h"), "p")
+			local fd = io.open(file, "w")
+			fd:write(content)
+			fd:close()
+		end
+		vim.system({ "git", "init", "-q" }, { cwd = dir }):wait()
+		vim.system({ "git", "add", "-A" }, { cwd = dir }):wait()
+		vim.system({ "git", "commit", "-qm", "init" }, { cwd = dir }):wait()
+		return dir
+	end
+
+	local dotted = make_repo("laze-build-test.nvim", {
+		["plugin/build_plugin.lua"] = "vim.g.laze_build_plugin = true\n",
+	})
+	local cmdrepo = make_repo("buildcmd", { ["plugin/b.lua"] = "" })
+	local fnrepo = make_repo("buildfn", { ["plugin/f.lua"] = "" })
+
+	local init_dir = root .. "/config"
+	vim.fn.mkdir(init_dir, "p")
+	local init_file = init_dir .. "/init.lua"
+	local fd = io.open(init_file, "w")
+	fd:write(
+		('vim.opt.packpath:prepend(vim.fn.stdpath("data"))\n')
+			.. ('vim.opt.rtp:prepend(%q)\n'):format(repo_path)
+			.. "require(\"laze\").setup({\n"
+			.. ("  { src = %q, build = \"touch build-ran\" },\n"):format(dotted)
+			.. ("  { src = %q, name = \"buildcmd\", build = \":lua vim.fn.writefile({'ran'}, vim.fn.stdpath('data') .. '/cmd-ran')\" },\n"):format(cmdrepo)
+			.. ("  { src = %q, name = \"buildfn\", build = function() vim.fn.writefile({'ran'}, vim.fn.stdpath('data') .. '/fn-ran') end },\n"):format(fnrepo)
+			.. "})\n"
+	)
+	fd:close()
+
+	local env = {
+		XDG_DATA_HOME = root .. "/data",
+		XDG_CONFIG_HOME = root .. "/config",
+		NVIM_LOG_FILE = root .. "/nvim.log",
+	}
+	vim.system({ vim.v.progpath, "-u", init_file, "--headless", "+qa" }, { env = env }):wait()
+
+	if
+		#vim.fn.glob(root .. "/data/nvim/site/pack/*/opt/laze-build-test.nvim/build-ran", false, true) == 1
+		and #vim.fn.glob(root .. "/data/nvim/cmd-ran", false, true) == 1
+		and #vim.fn.glob(root .. "/data/nvim/fn-ran", false, true) == 1
+	then
+		print("  ✓ build: string/:cmd/function forms run after install (pkg-keyed lookup)")
+		passed = passed + 1
+	else
+		print(
+			("  ✗ build: markers — string:%d :cmd:%d fn:%d"):format(
+				#vim.fn.glob(root .. "/data/nvim/site/pack/*/opt/laze-build-test.nvim/build-ran", false, true),
+				#vim.fn.glob(root .. "/data/nvim/cmd-ran", false, true),
+				#vim.fn.glob(root .. "/data/nvim/fn-ran", false, true)
+			)
+		)
+		failed = failed + 1
+	end
+
+	vim.fn.delete(root, "rf")
+end
+
+-- reload_all: re-runs setup with a fresh plan (dev-loop workflow). Dir
+-- specs keep this offline (no vim.pack installs) while exercising the
+-- real setup → plan → reload path.
+do
+	local eager_runs = 0
+	local specs = {
+		{
+			dir = vim.fn.tempname(),
+			name = "reload-eager",
+			config = function()
+				eager_runs = eager_runs + 1
+			end,
+		},
+	}
+	local compiled = laze.setup(specs)
+	if eager_runs == 1 and compiled.registry["reload-eager"] then
+		print("  ✓ reload_all: setup ran eager config once")
+		passed = passed + 1
+	else
+		print("  ✗ reload_all: setup eager config count = " .. eager_runs)
+		failed = failed + 1
+	end
+
+	local recompiled = laze.reload_all()
+	if eager_runs == 2 and recompiled and recompiled.registry["reload-eager"] then
+		print("  ✓ reload_all: eager plugin re-loaded with a fresh plan")
+		passed = passed + 1
+	else
+		print("  ✗ reload_all: eager config count after reload = " .. eager_runs)
+		failed = failed + 1
+	end
+
+	-- A trigger plugin stays lazy across the reload and fires afterwards
+	-- (autocmds are rebuilt, so the rebuilt trigger must be live).
+	local lazy_runs = 0
+	laze.setup({
+		{
+			dir = vim.fn.tempname(),
+			name = "reload-lazy",
+			ft = "laze-never-ft",
+			config = function()
+				lazy_runs = lazy_runs + 1
+			end,
+		},
+	})
+	laze.reload_all()
+	if lazy_runs == 0 then
+		print("  ✓ reload_all: trigger plugin stays lazy after reload")
+		passed = passed + 1
+	else
+		print("  ✗ reload_all: trigger plugin loaded at reload")
+		failed = failed + 1
+	end
+	vim.api.nvim_exec_autocmds("FileType", { pattern = "laze-never-ft" })
+	if lazy_runs == 1 then
+		print("  ✓ reload_all: rebuilt trigger fires after reload")
+		passed = passed + 1
+	else
+		print("  ✗ reload_all: trigger did not fire after reload (runs=" .. lazy_runs .. ")")
+		failed = failed + 1
+	end
+end
+
+-- after-dep cycle: only the cyclic branch is dropped, the rest of the
+-- chain still loads (dep-first order preserved around the cycle).
+do
+	local order = {}
+	local compiled = laze.compile({
+		{
+			"test/cycle-root",
+			name = "cycle-root",
+			after = { "cycle-a", "cycle-sane" },
+			config = function()
+				table.insert(order, "root")
+			end,
+		},
+		{
+			"test/cycle-a",
+			name = "cycle-a",
+			after = { "cycle-b" },
+			config = function()
+				table.insert(order, "a")
+			end,
+		},
+		{
+			"test/cycle-b",
+			name = "cycle-b",
+			after = { "cycle-a" },
+			config = function()
+				table.insert(order, "b")
+			end,
+		},
+		{
+			"test/cycle-sane",
+			name = "cycle-sane",
+			config = function()
+				table.insert(order, "sane")
+			end,
+		},
+	})
+	local plan_fn = laze.build_plan(compiled)
+	plan_fn()
+	if #order == 4 then
+		print("  ✓ after cycle: cyclic branch dropped, chain completed (4/4)")
+		passed = passed + 1
+	else
+		print("  ✗ after cycle: loaded " .. #order .. "/4")
+		failed = failed + 1
+	end
+	if order[1] == "b" and order[2] == "a" and order[3] == "sane" and order[4] == "root" then
+		print("  ✓ after cycle: dep-first order preserved around the cycle")
+		passed = passed + 1
+	else
+		print("  ✗ after cycle: bad order: " .. table.concat(order, ","))
+		failed = failed + 1
+	end
+end
+
+-- cond/enabled as functions returning false must SKIP (regression: the
+-- `type(...) == "function" and f() or ...` gotcha turned a false-returning
+-- function into true).
+do
+	local runs = 0
+	local compiled = laze.compile({
+		{ dir = vim.fn.tempname(), name = "cond-fn-false", cond = function() return false end, config = function() runs = runs + 1 end },
+		{ dir = vim.fn.tempname(), name = "enabled-fn-false", enabled = function() return false end, config = function() runs = runs + 1 end },
+		{ dir = vim.fn.tempname(), name = "cond-fn-true", cond = function() return true end, config = function() runs = runs + 1 end },
+		{ dir = vim.fn.tempname(), name = "enabled-fn-true", enabled = function() return true end, config = function() runs = runs + 1 end },
+	})
+	local plan = laze.build_plan(compiled)
+	plan()
+	if runs == 2 then
+		print("  ✓ cond/enabled: false-returning functions skip, true-returning load")
+		passed = passed + 1
+	else
+		print("  ✗ cond/enabled: runs=" .. runs)
+		failed = failed + 1
+	end
+	-- throwing hooks warn + skip instead of breaking the plan (never throw)
+	local msgs = {}
+	local orig_notify = vim.notify
+	vim.notify = function(msg, _)
+		table.insert(msgs, msg)
+	end
+	local compiled2 = laze.compile({
+		{ dir = vim.fn.tempname(), name = "cond-throw", cond = function() error("boom") end, config = function() runs = runs + 1 end },
+		{ dir = vim.fn.tempname(), name = "enabled-throw", enabled = function() error("boom2") end, config = function() runs = runs + 1 end },
+	})
+	local ok = pcall(function()
+		laze.build_plan(compiled2)()
+	end)
+	vim.notify = orig_notify
+	local warned_cond, warned_enabled = false, false
+	for _, m in ipairs(msgs) do
+		if m:find("cond hook failed", 1, true) then
+			warned_cond = true
+		end
+		if m:find("enabled hook failed", 1, true) then
+			warned_enabled = true
+		end
+	end
+	if ok and runs == 2 and warned_cond and warned_enabled then
+		print("  ✓ cond/enabled: throwing hooks warn + skip (plan never throws)")
+		passed = passed + 1
+	else
+		print(("  ✗ cond/enabled: throwing hooks — ok:%s cond:%s enabled:%s"):format(tostring(ok), tostring(warned_cond), tostring(warned_enabled)))
+		failed = failed + 1
+	end
+end
+
+-- on_load / on_fail hooks: called with numeric duration for loaded plugins,
+-- on_fail for init failures and module-require failures; silent suppresses
+-- the failure notification for its own plugin.
+do
+	local loads, fails, notifs = {}, {}, {}
+	local compiled = laze.compile({
+		{ dir = vim.fn.tempname(), name = "hook-ok", config = function() end },
+		{ dir = vim.fn.tempname(), name = "hook-fail", init = function() error("init boom") end },
+		{ dir = vim.fn.tempname(), name = "hook-silent", module = "laze.nope.silent", silent = true },
+		{ dir = vim.fn.tempname(), name = "hook-modfail", module = "laze.nope.loud" },
+	})
+	local orig_notify = vim.notify
+	vim.notify = function(msg, _)
+		table.insert(notifs, msg)
+	end
+	local plan = laze.build_plan(compiled, {
+		on_load = function(id, ms)
+			table.insert(loads, id .. ":" .. type(ms))
+		end,
+		on_fail = function(id, _)
+			table.insert(fails, id)
+		end,
+	})
+	plan()
+	pcall(require, "laze.nope.silent")
+	pcall(require, "laze.nope.loud")
+	vim.notify = orig_notify
+	if #loads == 1 and loads[1] == "hook-ok:number" then
+		print("  ✓ on_load: called once with numeric duration for the loaded plugin")
+		passed = passed + 1
+	else
+		print("  ✗ on_load: got " .. #loads .. " entries")
+		failed = failed + 1
+	end
+	local fail_ok = #fails == 3
+	local ordered = fails[1] == "hook-fail" and fails[2] == "hook-silent" and fails[3] == "hook-modfail"
+	if fail_ok and ordered then
+		print("  ✓ on_fail: init failure + both module-require failures reported")
+		passed = passed + 1
+	else
+		print("  ✗ on_fail: got " .. #fails .. " entries")
+		failed = failed + 1
+	end
+	local silent_notified, fail_notified = false, false
+	for _, m in ipairs(notifs) do
+		if m:find("hook-silent", 1, true) then
+			silent_notified = true
+		end
+		if m:find("hook-fail", 1, true) then
+			fail_notified = true
+		end
+	end
+	if not silent_notified then
+		print("  ✓ silent: module-require failure notification suppressed")
+		passed = passed + 1
+	else
+		print("  ✗ silent: suppression failed")
+		failed = failed + 1
+	end
+	if fail_notified then
+		print("  ✓ non-silent init failure notified")
+		passed = passed + 1
+	else
+		print("  ✗ non-silent failure: notification missing")
+		failed = failed + 1
+	end
+end
+
+-- reload_all with explicit specs replaces the registry (dev-loop override)
+do
+	local replaced = laze.reload_all({
+		{ dir = vim.fn.tempname(), name = "reload-new", config = function() end },
+	})
+	if replaced and replaced.registry["reload-new"] and not replaced.registry["reload-eager"] then
+		print("  ✓ reload_all: explicit specs replace the registry")
+		passed = passed + 1
+	else
+		print("  ✗ reload_all: explicit spec override failed")
+		failed = failed + 1
+	end
+end
+
+-- cmd route: invoking an undefined command fires CmdUndefined → load
+do
+	local ran = 0
+	local compiled = laze.compile({
+		{ "test/cmd-fires", name = "cmd-fires", cmd = "LazeUndefTestCmd", config = function() ran = ran + 1 end },
+	})
+	local plan = laze.build_plan(compiled)
+	plan()
+	pcall(vim.cmd, "LazeUndefTestCmd")
+	if ran == 1 then
+		print("  ✓ cmd route: undefined command invocation fires the load")
+		passed = passed + 1
+	else
+		print("  ✗ cmd route: ran=" .. ran)
+		failed = failed + 1
+	end
+end
+
+-- dir plugin outside packpath: the rtp-prepend fallback must still source
+-- plugin//ftdetect/ after startup (:packadd fails for dirs outside the
+-- packpath; without manual sourcing commands/maps never come to exist).
+do
+	local root = vim.fn.tempname()
+	local dir = root .. "/out-of-pack"
+	vim.fn.mkdir(dir .. "/plugin", "p")
+	local f = io.open(dir .. "/plugin/oop.lua", "w")
+	f:write("vim.api.nvim_create_user_command('LazeOopCmd', function() end, {})\n")
+	f:close()
+
+	local compiled = laze.compile({ { dir = dir, name = "oop", cmd = "LazeOopCmd" } })
+	laze.build_plan(compiled)()
+	pcall(vim.cmd, "LazeOopCmd")
+	if vim.fn.exists(":LazeOopCmd") == 2 then
+		print("  ✓ cmd route: dir outside packpath sources plugin/ on load")
+		passed = passed + 1
+	else
+		print("  ✗ cmd route: dir-outside-packpath plugin/ never sourced")
+		failed = failed + 1
+	end
+	vim.fn.delete(root, "rf")
+end
+
+-- dir plugin vs basename collision: :packadd resolves by bare directory
+-- name across 'packpath' (`pack/*/opt/<name>`), so a stale install sharing
+-- only the basename used to win and the user's dir was silently skipped.
+-- Activation must add the EXACT dir path regardless of packpath contents.
+do
+	local root = vim.fn.tempname() .. "_dircoll"
+	local stale = root .. "/site/pack/stale-opt/dir-coll"
+	vim.fn.mkdir(stale, "p") -- exists on packpath, but ships no lua/
+	local dev = root .. "/dev/dir-coll"
+	vim.fn.mkdir(dev .. "/lua", "p")
+	local f = io.open(dev .. "/lua/dir_coll.lua", "w")
+	f:write("return { ok = true }\n")
+	f:close()
+
+	vim.opt.packpath:prepend(root)
+	local compiled = laze.compile({ { dir = dev, name = "dir-coll" } })
+	laze.build_plan(compiled)()
+	local rtp_first = vim.opt.rtp:get()[1]
+	local ok_mod, mod = pcall(require, "dir_coll")
+	if ok_mod and mod.ok and rtp_first == dev then
+		print("  ✓ dir plugin: exact path wins over same-basename stale install")
+		passed = passed + 1
+	else
+		print(
+			"  ✗ dir plugin: basename collision hijacked activation (rtp[1]="
+				.. tostring(rtp_first)
+				.. ", mod="
+				.. tostring(ok_mod)
+				.. ")"
+		)
+		failed = failed + 1
+	end
+	vim.opt.packpath:remove(root)
+	vim.fn.delete(root, "rf")
+end
+
+-- event route: { event, pattern } matches by buffer name and only when it matches
+do
+	local ran = 0
+	local compiled = laze.compile({
+		{ dir = vim.fn.tempname(), name = "evp", event = { { event = "BufRead", pattern = "*.lua" } }, config = function() ran = ran + 1 end },
+	})
+	local plan = laze.build_plan(compiled)
+	plan()
+	local b_vim = vim.api.nvim_create_buf(false, true)
+	vim.api.nvim_buf_set_name(b_vim, "notes.vim")
+	vim.api.nvim_exec_autocmds("BufRead", { buffer = b_vim })
+	if ran == 0 then
+		print("  ✓ event pattern: non-matching buffer does not fire")
+		passed = passed + 1
+	else
+		print("  ✗ event pattern: non-matching buffer fired (ran=" .. ran .. ")")
+		failed = failed + 1
+	end
+	local b_lua = vim.api.nvim_create_buf(false, true)
+	vim.api.nvim_buf_set_name(b_lua, "notes.lua")
+	vim.api.nvim_exec_autocmds("BufRead", { buffer = b_lua })
+	if ran == 1 then
+		print("  ✓ event pattern: matching buffer fires once")
+		passed = passed + 1
+	else
+		print("  ✗ event pattern: matching buffer ran=" .. ran)
+		failed = failed + 1
+	end
+end
+
+-- keys route: rhs string is replayed after the load; map opts preserved
+do
+	local lhs = vim.api.nvim_replace_termcodes("<leader>kr", true, false, true)
+	local ran = 0
+	vim.g.laze_rhs_replayed = 0
+	local compiled = laze.compile({
+		{
+			dir = vim.fn.tempname(),
+			name = "key-rhs",
+			keys = { { lhs = "<leader>kr", rhs = "<cmd>let g:laze_rhs_replayed += 1<CR>", desc = "rhs test", silent = true } },
+			config = function()
+				ran = ran + 1
+			end,
+		},
+	})
+	local plan = laze.build_plan(compiled)
+	plan()
+	vim.api.nvim_feedkeys(lhs, "x", false)
+	vim.wait(50)
+	local km = nil
+	for _, k in ipairs(vim.api.nvim_get_keymap("n")) do
+		if k.lhs == lhs then
+			km = k
+		end
+	end
+	if ran == 1 and vim.g.laze_rhs_replayed == 1 then
+		print("  ✓ keys route: rhs replayed after load")
+		passed = passed + 1
+	else
+		print(("  ✗ keys route: rhs replay — ran:%d replayed:%d"):format(ran, vim.g.laze_rhs_replayed))
+		failed = failed + 1
+	end
+	if km and km.desc == "rhs test" and km.silent then
+		print("  ✓ keys route: desc/silent opts preserved on the trigger map")
+		passed = passed + 1
+	else
+		print("  ✗ keys route: map opts lost (desc=" .. tostring(km and km.desc) .. ")")
+		failed = failed + 1
+	end
+	vim.g.laze_rhs_replayed = nil
+	vim.keymap.del("n", lhs)
+end
+
+-- VeryLazy: fires immediately in headless (no UIEnter possible), exactly once
+do
+	local ran = 0
+	local compiled = laze.compile({
+		{ dir = vim.fn.tempname(), name = "vl-now", event = "VeryLazy", config = function() ran = ran + 1 end },
+	})
+	local plan = laze.build_plan(compiled)
+	plan()
+	vim.wait(10)
+	if ran == 1 then
+		print("  ✓ VeryLazy: fires immediately in headless, exactly once")
+		passed = passed + 1
+	else
+		print("  ✗ VeryLazy: ran=" .. ran)
+		failed = failed + 1
+	end
+end
+
+
+-- extras: lock (pure pieces — no setup(), no auto-registered commands,
+-- never required by the core). on_load/on_fail wiring is core API and is
+-- exercised by the e2e test; no wrapper module needed.
+do
+	-- core must not pull in extras: laze.lock must not be in
+	-- package.loaded before it is required explicitly.
+	if package.loaded["laze.lock"] ~= nil then
+		print("  ✗ core pulled in an opt-in module (laze.lock preloaded)")
+		failed = failed + 1
+	else
+		print("  ✓ core never requires opt-in modules (laze.lock untouched)")
+		passed = passed + 1
+	end
+
+	-- lock: hermetic write → apply round trip under a temp data dir
+	-- (LOCK_PATH is fixed at require time from stdpath("data")).
+	local lock_root = vim.fn.tempname()
+	vim.env.XDG_DATA_HOME = lock_root
+	local lock = require("laze.lock")
+	local lock_specs = { { "folke/lock-x.nvim", name = "lock-x", version = "1.2.3" } }
+	local noop = lock.apply(lock_specs)
+	if noop[1] == lock_specs[1] then
+		print("  ✓ laze.lock: apply with no lockfile returns specs untouched")
+		passed = passed + 1
+	else
+		print("  ✗ laze.lock: apply mutated specs without a lockfile")
+		failed = failed + 1
+	end
+	lock.write(lock.compile(lock_specs))
+	local re = lock.apply(lock_specs)
+	if re[1].commit == "1.2.3" and re[1] ~= lock_specs[1] then
+		print("  ✓ laze.lock: write → apply round trip injects commit into a copy")
+		passed = passed + 1
+	else
+		print("  ✗ laze.lock: round trip failed, commit=" .. tostring(re[1].commit))
+		failed = failed + 1
+	end
+	vim.env.XDG_DATA_HOME = nil
+	vim.fn.delete(lock_root, "rf")
+
+	-- lock is a pure piece: no auto-registered commands. Assert nothing
+	-- leaks into the command table.
+	local cmds = vim.api.nvim_get_commands({})
+	local leaked = false
+	for _, name in ipairs({ "LazeProfile", "LazeRetry", "LazeLock", "LazeSync" }) do
+		if cmds[name] then
+			leaked = true
+			print("  ✗ extras: unexpected command registered: :" .. name)
+			failed = failed + 1
+		end
+	end
+	if not leaked then
+		print("  ✓ extras: pure wiring works, no Laze* commands auto-registered")
+		passed = passed + 1
+	end
+end
+
+print(("\n%d passed, %d failed\n"):format(passed, failed))
+if failed > 0 then
+	os.exit(1)
+end

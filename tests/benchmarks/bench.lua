@@ -1,0 +1,100 @@
+--- Benchmark: measure only plan registration (no plugin loading)
+--- Run: nvim --cmd "set rtp+=." -l tests/bench.lua
+local laze = require("laze")
+local uv = vim.uv or vim.loop
+
+local function elapsed_us(start)
+	return (uv.hrtime() - start) / 1000
+end
+
+-- Warmup JIT
+laze.compile({ { "u/warmup", event = "VeryLazy" } })
+
+print("=== laze benchmark (registration only) ===\n")
+
+-- Generate real-world like specs (no fake plugins)
+local N = 100
+local specs = {}
+for i = 1, N do
+	local s = { ("user/plugin-%d"):format(i), name = ("p%d"):format(i) }
+	if i % 3 == 0 then
+		s.event = "VeryLazy"
+	end
+	if i % 5 == 0 then
+		s.ft = { "lua", "vim" }
+	end
+	if i % 7 == 0 then
+		s.cmd = ("Cmd%d"):format(i)
+	end
+	if i % 11 == 0 then
+		s.keys = { ("<leader>%d"):format(i) }
+	end
+	if i % 13 == 0 then
+		s.after = { ("p%d"):format(i - 1) }
+	end
+	if i % 17 == 0 then
+		s.dev = true
+	end
+	table.insert(specs, s)
+end
+
+-- compile
+local t0 = uv.hrtime()
+local compiled = laze.compile(specs)
+print(("compile %d specs: %.0f μs"):format(N, elapsed_us(t0)))
+
+-- build_plan
+local t1 = uv.hrtime()
+local plan = laze.build_plan(compiled)
+print(("build_plan:     %.0f μs"):format(elapsed_us(t1)))
+
+-- plan() — only trigger registration, not plugin loading
+-- Disable all plugins so plan() skips load_with_deps
+for _, entry in pairs(compiled.registry) do
+	entry.enabled = false
+end
+local t2 = uv.hrtime()
+plan()
+print(("plan() (no load): %.0f μs"):format(elapsed_us(t2)))
+
+print("\n=== scale: compile ===\n")
+for _, scale in ipairs({ 10, 50, 100, 200, 500 }) do
+	local big = {}
+	for i = 1, scale do
+		table.insert(big, { ("u/p-%d"):format(i), cmd = ("C%d"):format(i) })
+	end
+	local t0 = uv.hrtime()
+	laze.compile(big)
+	print(("compile %3d specs: %6.0f μs  (%5.2f μs/spec)"):format(scale, elapsed_us(t0), elapsed_us(t0) / scale))
+end
+
+print("\n=== scale: plan (triggers only) ===\n")
+local events_pool = { "BufRead", "BufWrite", "InsertEnter", "InsertLeave", "VimEnter" }
+local fts_pool = { "lua", "vim", "python", "rust", "json" }
+
+for _, scale in ipairs({ 10, 50, 100, 200 }) do
+	local big = {}
+	for i = 1, scale do
+		table.insert(big, {
+			("u/p-%d"):format(i),
+			event = events_pool[(i % #events_pool) + 1],
+			ft = fts_pool[(i % #fts_pool) + 1],
+			cmd = "Cmd" .. i,
+			keys = ("<leader>k%d"):format(i),
+		})
+	end
+	local c = laze.compile(big)
+	local p = laze.build_plan(c)
+	for _, entry in pairs(c.registry) do
+		entry.enabled = false
+	end
+	local t0 = uv.hrtime()
+	p()
+	print(
+		("plan %3d triggers (×4 types): %6.0f μs  (%5.2f μs/trigger)"):format(
+			scale,
+			elapsed_us(t0),
+			elapsed_us(t0) / (scale * 4)
+		)
+	)
+end

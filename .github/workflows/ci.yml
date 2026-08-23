@@ -1,0 +1,30 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # laze requires nvim 0.12+ (vim.pack). nightly catches API drift.
+        nvim: [v0.12.0, nightly]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Neovim
+        uses: rhysd/action-setup-vim@v1
+        with:
+          neovim: true
+          version: ${{ matrix.nvim }}
+
+      - name: Unit tests (luajit, no nvim needed)
+        run: |
+          luajit tests/test_compile.lua
+          luajit tests/test_subset.lua
+
+      - name: Integration tests (incl. spawned-session startup phases)
+        run: nvim --cmd "set rtp+=." -l tests/run.lua
