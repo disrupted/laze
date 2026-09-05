@@ -9,19 +9,22 @@
 ---@field keys? string|string[]|{lhs:string,rhs?:string|fun(),mode?:string|string[]}[]
 ---@field dev? boolean|string
 ---@field dev_path? string
----@field version? string|vim.VersionRange
+---@field version? string|vim.VersionRange|false
 ---@field data? any
 ---@field branch? string
 ---@field tag? string
 ---@field commit? string
 ---@field pin? boolean
----@field build? string|fun()
----@field module? string|string[]
+---@field build? string|fun()|false
+---@field module? string|string[]|false
+---@field main? string
+---@field opts? table
 ---@field init? fun()
 ---@field config? fun()
----@field cond? fun(): boolean
----@field enabled? boolean
+---@field cond? fun(): boolean|boolean
+---@field enabled? fun(): boolean|boolean
 ---@field silent? boolean
+---@field priority? number
 ---@field after? string[]
 
 ---@class LazeCompiled
@@ -34,6 +37,8 @@
 ---@field src string
 ---@field dir? string Local dir plugin path (excluded from pack; loaded via :packadd)
 ---@field module? string|string[]
+---@field main? string Module for opts (explicit; never guessed)
+---@field opts? table Passed to require(main).setup(opts) at load
 ---@field init? fun()
 ---@field config? fun()
 ---@field cond? fun(): boolean
@@ -187,12 +192,23 @@ function M.setup(specs, opts)
 			table.insert(eager_pack, spec)
 		end
 	end
-	vim.pack.add(eager_pack, { load = false })
-	vim.pack.add(lazy_pack, { load = function() end })
+	if #eager_pack > 0 then
+		vim.pack.add(eager_pack, { load = false })
+	end
+	if #lazy_pack > 0 then
+		vim.pack.add(lazy_pack, { load = function() end })
+	end
 
 	plan.build_plan(compiled, opts)()
 	last_setup = { specs = specs, opts = opts }
 	return compiled
+end
+
+--- Specs from the last setup() call (for opt-in extras like LazeClean).
+--- Read-only view: do not mutate the returned table.
+---@return LazeSpec[]?
+function M.get_specs()
+	return last_setup and last_setup.specs or nil
 end
 
 --- Re-run the last setup() call: re-compile, re-add to vim.pack

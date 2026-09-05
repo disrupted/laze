@@ -91,9 +91,11 @@ local function pkg_name(src, spec_name)
 	return last_segment(name) or name
 end
 
-local function resolve_src(src, dir, url, repo_name)
+local function resolve_src(src, dir, url)
 	if dir then
-		if dir:match("^~") then
+		-- Byte test, not `:match("^~")`: patterns are NYI in LuaJIT and
+		-- run interpreted (~50 ns vs sub-ns per call on this hot path).
+		if dir:byte(1) == 126 then -- "~"
 			return vim.fn.expand(dir)
 		end
 		return dir
@@ -104,13 +106,14 @@ local function resolve_src(src, dir, url, repo_name)
 	end
 
 	if src then
-		if src:match("^~") then
+		local b1 = src:byte(1)
+		if b1 == 126 then -- "~"
 			return vim.fn.expand(src)
 		end
-		if src:match("^/") or src:match("^%.") then
+		if b1 == 47 or b1 == 46 then -- "/" or "."
 			return src
 		end
-		if src:match("^https?://") or src:match("^git@") then
+		if src:sub(1, 8) == "https://" or src:sub(1, 7) == "http://" or src:sub(1, 4) == "git@" then
 			return src
 		end
 		return "https://github.com/" .. src
@@ -148,6 +151,19 @@ local function normalize_keys(v)
 	return {}
 end
 
+--- Neovim stores some event names under a canonical alias
+--- (`:autocmd BufRead` shows as `BufReadPost`). The grouped dispatcher
+--- looks routes up by `ev.event`, so keys must use the stored form —
+--- normalize here, once, instead of at every fire. Verified empirically
+--- (create + read back rows): BufRead→BufReadPost, BufCreate→BufAdd,
+--- BufWrite→BufWritePre. Matches lazy.nvim behavior (it passes names
+--- straight to nvim_create_autocmd, which applies the same mapping).
+local EVENT_ALIASES = {
+	BufRead = "BufReadPost",
+	BufCreate = "BufAdd",
+	BufWrite = "BufWritePre",
+}
+
 --- Normalize lazy.nvim event values (string | string[] | {event,pattern}[]).
 ---@param v any
 ---@return {event: string, pattern?: string}[] -- event name and optional pattern
@@ -156,18 +172,18 @@ local function normalize_events(v)
 		return {}
 	end
 	if type(v) == "string" then
-		return { { event = v } }
+		return { { event = EVENT_ALIASES[v] or v } }
 	end
 	if type(v) == "table" then
 		local result = {}
 		for _, item in ipairs(v) do
 			if type(item) == "string" then
-				table.insert(result, { event = item })
+				table.insert(result, { event = EVENT_ALIASES[item] or item })
 			elseif type(item) == "table" then
 				-- lazy.nvim form: { event = {"BufReadPre", "BufReadPost"}, pattern = "*.lua" }
 				local events = type(item.event) == "table" and item.event or { item.event }
 				for _, ev in ipairs(events) do
-					table.insert(result, { event = ev, pattern = item.pattern })
+					table.insert(result, { event = EVENT_ALIASES[ev] or ev, pattern = item.pattern })
 				end
 			end
 		end
@@ -213,15 +229,48 @@ local function add_to_route(route_map, keys, plugin_id)
 end
 
 --- Event routes now carry optional autocmd patterns (lazy.nvim `{event, pattern}` form).
+--- One entry per event name: a second plugin using the same event with a
+--- DIFFERENT pattern is a conflict (a single autocmd can only carry one) —
+--- warn and keep the first instead of silently dropping the second.
 local function add_to_event_route(route_map, events, plugin_id)
 	for i = 1, #events do
 		local ev = events[i]
 		local name = ev.event
 		if not route_map[name] then
 			route_map[name] = { ids = {}, pattern = ev.pattern }
+		elseif route_map[name].pattern ~= ev.pattern then
+			vim.notify(
+				("laze: event %q has conflicting patterns (%s vs %s) — keeping the first; give the plugins distinct events or matching patterns"):format(
+					name,
+					vim.inspect(route_map[name].pattern),
+					vim.inspect(ev.pattern)
+				),
+				vim.log.levels.WARN
+			)
 		end
 		table.insert(route_map[name].ids, plugin_id)
 	end
+end
+
+--- Same lhs from two specs: the trigger map is shared, so mode/rhs/desc/
+--- silent must agree — warn and keep the first instead of silently
+--- dropping the second spec's values.
+local function same_mode(a, b)
+	if type(a) ~= type(b) then
+		return false
+	end
+	if type(a) ~= "table" then
+		return a == b
+	end
+	if #a ~= #b then
+		return false
+	end
+	for i = 1, #a do
+		if a[i] ~= b[i] then
+			return false
+		end
+	end
+	return true
 end
 
 local function add_to_key_route(route_map, keys, plugin_id)
@@ -230,6 +279,14 @@ local function add_to_key_route(route_map, keys, plugin_id)
 		local lhs = ke.lhs
 		if not route_map[lhs] then
 			route_map[lhs] = { mode = ke.mode, ids = {}, rhs = ke.rhs, desc = ke.desc, silent = ke.silent }
+		else
+			local cur = route_map[lhs]
+			if not same_mode(cur.mode, ke.mode) or cur.rhs ~= ke.rhs or cur.desc ~= ke.desc or cur.silent ~= ke.silent then
+				vim.notify(
+					("laze: keys %q is shared by multiple plugins with different mode/rhs/opts — keeping the first"):format(lhs),
+					vim.log.levels.WARN
+				)
+			end
 		end
 		table.insert(route_map[lhs].ids, plugin_id)
 	end
@@ -275,22 +332,21 @@ local CONSUMED_KEYS = {
 }
 
 --- lazy.nvim fields that laze accepts but that have no vim.pack equivalent.
---- They are consumed (not passed through) and produce a warning on every
---- compile so users know the config will not behave identically on both
---- managers.
+--- They are consumed (not passed through) and produce one warning per
+--- field per compile so users know the config will not behave identically
+--- on both managers (a notify costs ~180 us — no per-spec repeat).
 local UNSUPPORTED_FIELDS = {
-	main = "only used with opts/config=true which laze does not implement",
 	submodules = "no equivalent; vim.pack fetches submodules by default",
 	optional = "deps are always required; remove 'optional'",
-	opts = "not implemented; use config = function() ... end",
 	import = "lazy.nvim-only; load spec files yourself and pass the tables to setup",
 	lazy = "no equivalent; plugins without triggers are eager",
 	specs = "no equivalent; inline your specs instead",
 }
 
-local function warn_unsupported(spec, idx, spec_id)
+local function warn_unsupported(spec, idx, spec_id, warned)
 	for field, reason in pairs(UNSUPPORTED_FIELDS) do
-		if spec[field] ~= nil then
+		if spec[field] ~= nil and not warned[field] then
+			warned[field] = true
 			vim.notify(
 				("laze: spec [%d] (%s): '%s' is not supported by laze (%s)"):format(idx, spec_id, field, reason),
 				vim.log.levels.WARN
@@ -398,7 +454,7 @@ local function validate_triggers(spec, idx, spec_id)
 	end
 end
 
-local function validate_spec(spec, idx)
+local function validate_spec(spec, idx, warned)
 	local src = spec[1] or spec.src
 	if not src and not spec.dir and not spec.url then
 		error("spec [" .. idx .. "]: missing source — use [1], .src, .dir, or .url", 0)
@@ -414,7 +470,7 @@ local function validate_spec(spec, idx)
 
 	local spec_id = tostring(src or spec.dir or spec.url)
 
-	warn_unsupported(spec, idx, spec_id)
+	warn_unsupported(spec, idx, spec_id, warned)
 
 	if spec.dev == "" then
 		vim.notify("laze: spec [" .. idx .. "] (" .. spec_id .. ") has dev='' — ignored", vim.log.levels.WARN)
@@ -430,11 +486,27 @@ local function validate_spec(spec, idx)
 					.. idx
 					.. "] ("
 					.. spec_id
-					.. "): config = true requires opts support which laze does not implement — use config = function() require(...).setup() end",
+					.. "): config = true is not supported — use opts = {...} with main, or config = function() require(...).setup() end",
 				0
 			)
 		end
 		error("spec [" .. idx .. "] (" .. spec_id .. "): config must be a function", 0)
+	end
+	-- opts is laze's lazy.nvim-compatible setup shorthand: a table passed
+	-- to require(main).setup(opts) at load. main is never guessed
+	-- (repo names don't map to module names) — it must be explicit.
+	-- config and opts together is ambiguous: specify one.
+	if spec.opts ~= nil and type(spec.opts) ~= "table" then
+		error("spec [" .. idx .. "] (" .. spec_id .. "): opts must be a table", 0)
+	end
+	if spec.main ~= nil and (type(spec.main) ~= "string" or spec.main == "") then
+		error("spec [" .. idx .. "] (" .. spec_id .. "): main must be a non-empty string", 0)
+	end
+	if spec.opts ~= nil and spec.main == nil then
+		error("spec [" .. idx .. "] (" .. spec_id .. "): opts requires main (laze never guesses the module name)", 0)
+	end
+	if spec.opts ~= nil and spec.config ~= nil then
+		error("spec [" .. idx .. "] (" .. spec_id .. "): specify config or opts, not both", 0)
 	end
 	-- lazy.nvim accepts boolean or function for both cond and enabled.
 	if spec.cond ~= nil and type(spec.cond) ~= "function" and type(spec.cond) ~= "boolean" then
@@ -617,8 +689,14 @@ function compile(specs, opts)
 		modules = {},
 	}
 
+	-- Unsupported-field warnings are deduped per field per compile: a
+	-- single vim.notify costs ~180 us headless, so N specs sharing one
+	-- unsupported field would otherwise pay N× per startup for the same
+	-- message. The first offending spec is named in the message.
+	local warned = {}
+
 	for idx, spec in ipairs(expanded) do
-		validate_spec(spec, idx)
+		validate_spec(spec, idx, warned)
 
 		local src = spec[1] or spec.src
 		local dir = spec.dir
@@ -683,6 +761,21 @@ function compile(specs, opts)
 				build = nil
 			end
 
+			-- opts without config desugars to require(main).setup(opts),
+			-- run in the config slot at load. Pure transform: the closure
+			-- captures only main/opts, so re-compiles are deterministic.
+			local config = spec.config
+			if config == nil and spec.opts ~= nil then
+				local main, opts = spec.main, spec.opts
+				config = function()
+					local mod = require(main)
+					if type(mod.setup) ~= "function" then
+						error(("module %q has no setup function"):format(main), 0)
+					end
+					mod.setup(opts)
+				end
+			end
+
 			local norm = {
 				src = src,
 				name = name,
@@ -694,12 +787,14 @@ function compile(specs, opts)
 				dir = dir,
 				url = url,
 				init = spec.init,
-				config = spec.config,
+				config = config,
 				cond = spec.cond,
 				enabled = enabled,
 				after = after,
 				build = build,
 				module = spec.module,
+				main = spec.main,
+				opts = spec.opts,
 				dev_path = spec.dev_path,
 			}
 
@@ -718,13 +813,13 @@ function compile(specs, opts)
 			-- dev = "path" is the per-plugin dev directory (lazy.nvim
 			-- semantics): ~ expands, absolute/relative stay verbatim —
 			-- consistent with dev_path and the README notes.
-			if norm.dev:match("^~") then
+			if norm.dev:byte(1) == 126 then -- "~"
 				final_src = vim.fn.expand(norm.dev)
 			else
 				final_src = norm.dev
 			end
 		elseif norm.dev_path then
-			if norm.dev_path:match("^~") then
+			if norm.dev_path:byte(1) == 126 then -- "~"
 				final_src = vim.fn.expand(norm.dev_path)
 			else
 				final_src = norm.dev_path
@@ -748,6 +843,8 @@ function compile(specs, opts)
 			silent = spec.silent == true,
 			build = norm.build,
 			module = modname,
+			main = norm.main,
+			opts = norm.opts,
 			priority = type(spec.priority) == "number" and spec.priority or 50,
 			dev = norm.dev,
 			dev_path = norm.dev_path,

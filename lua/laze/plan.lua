@@ -5,6 +5,13 @@
 -- left by its predecessor instead of accumulating stale trigger closures.
 local installed_preloads = {}
 
+-- Key trigger maps installed by the last plan, as { { mode, lhs, desc } }.
+-- Module-level for the same reason: a rebuilt plan deletes its
+-- predecessor's maps, otherwise removed specs keep firing stale closures.
+-- Deletion is desc-guarded (see below): a plugin map that took over the
+-- lhs after load usually carries its own desc and must survive.
+local installed_keys = {}
+
 --- Map every pack-plugin directory currently on 'runtimepath' to its pkg
 --- name (`{ [pkg]: dir }`). Mirrors the discovery glob below
 --- (`stdpath("data")/site/pack/*/opt/<pkg>`, lexicographically first match),
@@ -90,10 +97,12 @@ local function build_plan(compiled, opts)
 
 	-- Source a plugin's own after/plugin/* scripts. :packadd sources
 	-- plugin/ and ftdetect/ but NOT after/plugin (startup-only), so plugins
-	-- loaded after startup need this. All files are sourced sorted; each is
-	-- guarded by the plugin's own `loaded` state upstream.
+	-- loaded after startup need this. Files are sourced in sorted order
+	-- (matching the startup after/plugin phase); each is guarded by the
+	-- plugin's own `loaded` state upstream.
 	local function source_after_plugin(dir)
 		local files = vim.fn.glob(dir .. "/after/plugin/**/*.{lua,vim}", false, true)
+		table.sort(files)
 		for _, file in ipairs(files) do
 			pcall(vim.cmd.source, file)
 		end
@@ -419,13 +428,44 @@ local function build_plan(compiled, opts)
 	return function()
 		local verylazy_ids
 
+		-- Clear the previous plan's keymaps first: unlike autocmd groups
+		-- (cleared below even when empty), keymaps have no group to clear.
+		-- Only delete maps still carrying the trigger desc — after a load
+		-- the plugin's own map may own this lhs (takeover), and a user map
+		-- may share it; both must survive the rebuild.
+		for _, k in ipairs(installed_keys) do
+			-- get_keymap reports the lhs leader-expanded; expand the same
+			-- way before comparing (mirrors the lookup in tests/run.lua).
+			local want = vim.api.nvim_replace_termcodes(k.lhs, true, false, true)
+			for _, km in ipairs(vim.api.nvim_get_keymap(k.mode)) do
+				if km.lhs == want and km.desc == k.desc then
+					pcall(vim.keymap.del, k.mode, k.lhs)
+					break
+				end
+			end
+		end
+		installed_keys = {}
+
+		-- Groups are (re)created unconditionally so a rebuilt plan with
+		-- FEWER routes clears stale autocmds: skipping creation when a
+		-- route table is empty would leave the predecessor's closures
+		-- live, firing removed specs' configs.
+		local events_group = vim.api.nvim_create_augroup("laze_events", { clear = true })
+		local fts_group = vim.api.nvim_create_augroup("laze_fts", { clear = true })
+		local cmds_group = vim.api.nvim_create_augroup("laze_cmds", { clear = true })
+
 		if next(routes.events) then
-			local group = vim.api.nvim_create_augroup("laze_events", { clear = true })
+			local group = events_group
+			-- Bucket events by autocmd pattern: one API call per bucket
+			-- instead of one per event (~1.3 us each). `once = true` is
+			-- per-event-row (verified: rows self-delete independently), so
+			-- fire-once semantics are unchanged; per-fire dispatch on
+			-- ev.event is a single hash lookup.
+			local buckets = {} ---@type table<string, { pattern?: string, names: string[] }>
+			local border = {}
 			for event, ev in pairs(routes.events) do
-				local ids = ev.ids
-				local pattern = ev.pattern
 				if event == "VeryLazy" then
-					verylazy_ids = ids
+					verylazy_ids = ev.ids
 					local function fire_verylazy()
 						vim.api.nvim_exec_autocmds("User", { pattern = "VeryLazy" })
 					end
@@ -439,40 +479,58 @@ local function build_plan(compiled, opts)
 						pattern = "VeryLazy",
 						once = true,
 						callback = function()
-							for _, id in ipairs(ids) do
+							for _, id in ipairs(ev.ids) do
 								load_with_deps(id)
 							end
 						end,
 					})
 				else
-					vim.api.nvim_create_autocmd(event, {
-						group = group,
-						pattern = pattern,
-						once = true,
-						callback = function()
-							for _, id in ipairs(ids) do
-								load_with_deps(id)
-							end
-						end,
-					})
+					local key = ev.pattern or ""
+					local b = buckets[key]
+					if not b then
+						b = { pattern = ev.pattern, names = {} }
+						buckets[key] = b
+						table.insert(border, b)
+					end
+					table.insert(b.names, event)
 				end
 			end
-		end
-
-		if next(routes.fts) then
-			local group = vim.api.nvim_create_augroup("laze_fts", { clear = true })
-			for ft, ids in pairs(routes.fts) do
-				vim.api.nvim_create_autocmd("FileType", {
+			for _, b in ipairs(border) do
+				vim.api.nvim_create_autocmd(b.names, {
 					group = group,
-					pattern = ft,
+					pattern = b.pattern,
 					once = true,
-					callback = function()
-						for _, id in ipairs(ids) do
-							load_with_deps(id)
+					callback = function(ev)
+						local entry = routes.events[ev.event]
+						if entry then
+							for _, id in ipairs(entry.ids) do
+								load_with_deps(id)
+							end
 						end
 					end,
 				})
 			end
+		end
+
+		if next(routes.fts) then
+			local group = fts_group
+			-- Single dispatcher: one FileType autocmd for all triggers
+			-- (N per-ft autocmds cost ~15 us each at startup). The lookup
+			-- is O(1) per FileType event; per-plugin idempotency comes
+			-- from load_with_deps' loaded[] guard (the old per-ft
+			-- `once = true` self-delete is subsumed by it).
+			vim.api.nvim_create_autocmd("FileType", {
+				group = group,
+				pattern = "*",
+				callback = function(ev)
+					local current_ids = routes.fts[ev.match]
+					if current_ids then
+						for _, id in ipairs(current_ids) do
+							load_with_deps(id)
+						end
+					end
+				end,
+			})
 
 			-- A file passed on Neovim's command line can receive its FileType
 			-- before init.lua reaches laze.setup(). In that case the FileType
@@ -505,21 +563,26 @@ local function build_plan(compiled, opts)
 		end
 
 		if next(routes.cmds) then
-			local group = vim.api.nvim_create_augroup("laze_cmds", { clear = true })
-			for cmd, ids in pairs(routes.cmds) do
-				vim.api.nvim_create_autocmd("CmdUndefined", {
-					group = group,
-					pattern = cmd,
-					callback = function()
-						for _, id in ipairs(ids) do
-							load_with_deps(id)
-						end
-						if vim.v.vim_did_enter == 0 then
-							defer_startup_command(cmd)
-						end
-					end,
-				})
-			end
+			local group = cmds_group
+			-- Single dispatcher: one CmdUndefined autocmd for all triggers
+			-- (N per-cmd autocmds cost ~12 us each at startup). Undefined
+			-- commands are rare, so the O(1) lookup per misfire is free.
+			vim.api.nvim_create_autocmd("CmdUndefined", {
+				group = group,
+				pattern = "*",
+				callback = function(ev)
+					local ids = routes.cmds[ev.match]
+					if not ids then
+						return
+					end
+					for _, id in ipairs(ids) do
+						load_with_deps(id)
+					end
+					if vim.v.vim_did_enter == 0 then
+						defer_startup_command(ev.match)
+					end
+				end,
+			})
 		end
 
 		for lhs, entry in pairs(routes.keys) do
@@ -531,6 +594,7 @@ local function build_plan(compiled, opts)
 				if entry.silent ~= nil then
 					keymap_opts.silent = entry.silent
 				end
+				table.insert(installed_keys, { mode = mode, lhs = lhs, desc = keymap_opts.desc })
 				vim.keymap.set(mode, lhs, function()
 					if rhs == nil then
 						-- No rhs: the plugin's own keymap takes over after load.
