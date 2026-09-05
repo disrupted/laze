@@ -61,6 +61,7 @@ local fixtures = {
 	"cond_enabled",
 	"name_derivation",
 	"priority_build",
+	"opts_main",
 }
 
 local function serialize(val, indent)

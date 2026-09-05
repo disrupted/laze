@@ -1,19 +1,32 @@
 --- Test runner for laze
 ---
---- Run: nvim --cmd "set rtp+=." -l tests/run.lua
+--- Run: nvim --cmd "set rtp+=." -l tests/run.lua [fast] [fixture ...] [perf]
 --- Compile tests compare against snapshots in tests/snapshots/.
 --- Regenerate with: nvim --cmd "set rtp+=." -l tests/update_snapshots.lua
+--- `fast` skips the spawned-session blocks (startup phases, build,
+--- pkg-name parity) so the common loop stays in one nvim instance.
 local laze = require("laze")
 local FN = require("tests.fixtures._sentinel").FN
 
 local passed = 0
 local failed = 0
 
--- Build fixture filter from CLI args (e.g. `nvim ... tests/run.lua basic disabled`)
+-- Build fixture filter from CLI args (e.g. `nvim ... tests/run.lua basic disabled`).
 -- arg[0] is the script path; args after it are fixture names to filter for.
+-- `fast` is a mode flag (skip spawned sessions), not a fixture name.
 local filter = {}
+local fast_only = false
 for i = 1, #arg do
-	filter[arg[i]] = true
+	if arg[i] == "fast" then
+		fast_only = true
+	else
+		-- `perf` also implies fast: the perf suite is in-process only
+		-- (the docstring promises "perf regression suite only").
+		if arg[i] == "perf" then
+			fast_only = true
+		end
+		filter[arg[i]] = true
+	end
 end
 local function is_filtered(name)
 	return next(filter) == nil or filter[name] == true
@@ -100,6 +113,7 @@ local compile_fixtures = {
 	"cond_enabled",
 	"name_derivation",
 	"priority_build",
+	"opts_main",
 }
 
 for _, name in ipairs(compile_fixtures) do
@@ -185,46 +199,73 @@ if is_filtered("basic") then
 	end
 end
 
--- CmdUndefined autocmd is registered for cmd routes
+-- CmdUndefined dispatcher is registered for cmd routes (single "*" entry
+-- dispatching via routes.cmds), and firing it loads the plugin
 do
+	local ran = 0
 	local compiled = laze.compile({
-		{ "test/cmd-plugin", cmd = "LazyCmdTest", name = "cmd-test" },
+		{ "test/cmd-plugin", cmd = "LazyCmdTest", name = "cmd-test", config = function() ran = ran + 1 end },
 	})
 	local plan = laze.build_plan(compiled)
 	plan()
 
 	local aucmds = vim.api.nvim_get_autocmds({
 		event = "CmdUndefined",
-		pattern = "LazyCmdTest",
+		group = "laze_cmds",
 	})
 
-	if #aucmds == 1 then
-		print("  ✓ cmd route: CmdUndefined autocmd registered")
+	if #aucmds == 1 and aucmds[1].pattern == "*" then
+		print("  ✓ cmd route: single CmdUndefined dispatcher registered")
 		passed = passed + 1
 	else
-		print(("  ✗ cmd route: expected 1 CmdUndefined autocmd, got %d"):format(#aucmds))
+		print(("  ✗ cmd route: expected 1 CmdUndefined dispatcher, got %d"):format(#aucmds))
+		failed = failed + 1
+	end
+
+	pcall(vim.cmd, "LazyCmdTest")
+	if ran == 1 then
+		print("  ✓ cmd route: dispatcher loads the plugin on command")
+		passed = passed + 1
+	else
+		print(("  ✗ cmd route: dispatcher did not load (ran=%d)"):format(ran))
 		failed = failed + 1
 	end
 end
 
--- FileType autocmd is registered for ft routes
+-- FileType dispatcher is registered for ft routes (single "*" entry),
+-- fires only for the matching filetype, and ignores unrelated ones
 do
+	local ran = 0
 	local compiled = laze.compile({
-		{ "test/ft-plugin", ft = "myfttest" },
+		{ "test/ft-plugin", ft = "myfttest", config = function() ran = ran + 1 end },
 	})
 	local plan = laze.build_plan(compiled)
 	plan()
 
 	local aucmds = vim.api.nvim_get_autocmds({
 		event = "FileType",
-		pattern = "myfttest",
+		group = "laze_fts",
 	})
 
-	if #aucmds == 1 then
-		print("  ✓ ft route: FileType autocmd registered")
+	if #aucmds == 1 and aucmds[1].pattern == "*" then
+		print("  ✓ ft route: single FileType dispatcher registered")
 		passed = passed + 1
 	else
-		print(("  ✗ ft route: expected 1 FileType autocmd, got %d"):format(#aucmds))
+		print(("  ✗ ft route: expected a FileType dispatcher, got %d"):format(#aucmds))
+		failed = failed + 1
+	end
+
+	local b_other = vim.api.nvim_create_buf(false, true)
+	vim.api.nvim_buf_set_name(b_other, "other.txt")
+	vim.api.nvim_exec_autocmds("FileType", { pattern = "otherft" })
+	local b_hit = vim.api.nvim_create_buf(false, true)
+	vim.api.nvim_buf_set_name(b_hit, "hit.txt")
+	vim.api.nvim_exec_autocmds("FileType", { pattern = "myfttest" })
+	if ran == 1 then
+		print("  ✓ ft route: dispatcher fires only on the matching filetype")
+		passed = passed + 1
+	else
+		print(("  ✗ ft route: dispatcher fired wrong (ran=%d)"):format(ran))
 		failed = failed + 1
 	end
 end
@@ -381,6 +422,88 @@ do
 		print(("  ✗ event route: expected 1 autocmd, got %d"):format(#aucmds))
 		failed = failed + 1
 	end
+end
+
+-- events sharing a pattern are wired by one autocmd call (rows share its
+-- id) and still fire independently per event (once=true is per-row)
+do
+	local ran_a, ran_b = 0, 0
+	local compiled = laze.compile({
+		{ "test/ev-a", event = "BufRead", config = function() ran_a = ran_a + 1 end },
+		{ "test/ev-b", event = "InsertEnter", config = function() ran_b = ran_b + 1 end },
+	})
+	local plan = laze.build_plan(compiled)
+	plan()
+
+	local rows = vim.api.nvim_get_autocmds({ group = "laze_events" })
+	if #rows == 2 and rows[1].id == rows[2].id then
+		print("  ✓ event route: two events share one autocmd call (same id)")
+		passed = passed + 1
+	else
+		print(("  ✗ event route: expected 2 rows with one id, got %d rows"):format(#rows))
+		failed = failed + 1
+	end
+
+	vim.api.nvim_exec_autocmds("BufRead", { group = "laze_events" })
+	vim.api.nvim_exec_autocmds("BufRead", { group = "laze_events" })
+	vim.api.nvim_exec_autocmds("InsertEnter", { group = "laze_events" })
+	if ran_a == 1 and ran_b == 1 then
+		print("  ✓ event route: grouped rows fire once each, independently")
+		passed = passed + 1
+	else
+		print(("  ✗ event route: grouped fire — a:%d b:%d"):format(ran_a, ran_b))
+		failed = failed + 1
+	end
+end
+
+-- rebuild with fewer routes clears stale triggers (no stale closures):
+-- removed specs must not fire, and their keymaps must go while
+-- unrelated user maps survive
+do
+	local ran = 0
+	local c1 = laze.compile({
+		{ dir = vim.fn.tempname(), name = "stale-ev", event = "BufReadPost", config = function() ran = ran + 1 end },
+	})
+	laze.build_plan(c1)()
+	local c2 = laze.compile({ { dir = vim.fn.tempname(), name = "stale-none" } })
+	laze.build_plan(c2)()
+	local rows = vim.api.nvim_get_autocmds({ group = "laze_events" })
+	vim.api.nvim_exec_autocmds("BufReadPost", {})
+	if #rows == 0 and ran == 0 then
+		print("  ✓ rebuild: removed event trigger cleared, stale closure silent")
+		passed = passed + 1
+	else
+		print(("  ✗ rebuild: rows=%d ran=%d"):format(#rows, ran))
+		failed = failed + 1
+	end
+end
+
+do
+	local lhs = vim.api.nvim_replace_termcodes("<leader>sk", true, false, true)
+	local c1 = laze.compile({
+		{ dir = vim.fn.tempname(), name = "stale-key", keys = "<leader>sk" },
+	})
+	laze.build_plan(c1)()
+	vim.keymap.set("n", "<leader>sk2", function() end, { desc = "user map" })
+	local c2 = laze.compile({ { dir = vim.fn.tempname(), name = "stale-none2" } })
+	laze.build_plan(c2)()
+	local trigger_gone, user_kept = true, false
+	for _, km in ipairs(vim.api.nvim_get_keymap("n")) do
+		if km.lhs == lhs then
+			trigger_gone = false
+		end
+		if km.desc == "user map" then
+			user_kept = true
+		end
+	end
+	if trigger_gone and user_kept then
+		print("  ✓ rebuild: removed key trigger cleared, user map kept")
+		passed = passed + 1
+	else
+		print(("  ✗ rebuild: trigger_gone=%s user_kept=%s"):format(tostring(trigger_gone), tostring(user_kept)))
+		failed = failed + 1
+	end
+	vim.keymap.del("n", "<leader>sk2")
 end
 
 -- dir plugins are excluded from pack and loaded via packadd/rtp by the plan
@@ -738,7 +861,8 @@ end -- perf if
 -- sourcing, the plugin/ phase and the after/plugin phase. A regression in
 -- the activation invariant (e.g. full :packadd during startup instead of
 -- :packadd!) shows up as two "sourcing" lines for the same file.
-do
+-- Skipped under `fast` (needs spawned sessions + git installs).
+if not fast_only then
 	local root = vim.fn.tempname() .. "_lazestart"
 	vim.fn.mkdir(root, "p")
 	local repo_path = vim.fn.getcwd()
@@ -864,7 +988,8 @@ end
 -- uses a DOTTED directory name so id ("laze-build-test") != pack name
 -- ("laze-build-test.nvim") — a regression guard for the builds map being
 -- keyed by pkg instead of registry id.
-do
+-- Skipped under `fast` (needs a spawned session + git installs).
+if not fast_only then
 	local root = vim.fn.tempname() .. "_lazebuild"
 	vim.fn.mkdir(root, "p")
 	local repo_path = vim.fn.getcwd()
@@ -942,7 +1067,8 @@ end
 -- laze.compile → vim.pack.add(compiled.pack), one through raw
 -- vim.pack.add) and both disk listings are compared against the predicted
 -- names.
-do
+-- Skipped under `fast` (needs two spawned install sessions).
+if not fast_only then
 	local root = vim.fn.tempname() .. "_lazepkg"
 	vim.fn.mkdir(root, "p")
 
@@ -1479,6 +1605,140 @@ do
 	end
 end
 
+-- unsupported-field warnings are deduped per field per compile
+do
+	local msgs = {}
+	local orig_notify = vim.notify
+	vim.notify = function(msg, _)
+		table.insert(msgs, msg)
+	end
+	laze.compile({
+		{ "test/u1", lazy = true },
+		{ "test/u2", lazy = true },
+		{ "test/u3", import = "x" },
+		{ "test/u4", main = "m", opts = { foo = 1 } },
+	})
+	vim.notify = orig_notify
+	if #msgs == 2 then
+		print("  ✓ unsupported fields: one warning per field per compile")
+		passed = passed + 1
+	else
+		print(("  ✗ unsupported fields: expected 2 warnings, got %d"):format(#msgs))
+		failed = failed + 1
+	end
+end
+
+-- opts+main: generates config = require(main).setup(opts) at load
+do
+	local got = nil
+	package.preload["opts_test_mod"] = function()
+		return {
+			setup = function(o)
+				got = o
+			end,
+		}
+	end
+	local compiled = laze.compile({
+		{ dir = vim.fn.tempname(), name = "opts-gen", main = "opts_test_mod", opts = { foo = 1 } },
+	})
+	laze.build_plan(compiled)()
+	package.preload["opts_test_mod"] = nil
+	package.loaded["opts_test_mod"] = nil
+	if got and got.foo == 1 then
+		print("  ✓ opts: generated config calls require(main).setup(opts)")
+		passed = passed + 1
+	else
+		print("  ✗ opts: generated config did not run setup with opts")
+		failed = failed + 1
+	end
+end
+
+-- opts without main is a compile error (laze never guesses module names)
+do
+	local ok = pcall(laze.compile, {
+		{ "test/opts-nomain", opts = { foo = 1 } },
+	})
+	if not ok then
+		print("  ✓ opts: missing main is a compile error")
+		passed = passed + 1
+	else
+		print("  ✗ opts: missing main compiled without error")
+		failed = failed + 1
+	end
+end
+
+-- opts must be a table (function form deferred)
+do
+	local ok = pcall(laze.compile, {
+		{ "test/opts-fn", main = "x", opts = function() end },
+	})
+	if not ok then
+		print("  ✓ opts: function form is a compile error")
+		passed = passed + 1
+	else
+		print("  ✗ opts: function form compiled without error")
+		failed = failed + 1
+	end
+end
+
+-- config and opts together is a compile error (specify one)
+do
+	local ok = pcall(laze.compile, {
+		{ "test/opts-both", main = "x", opts = { a = 1 }, config = function() end },
+	})
+	if not ok then
+		print("  ✓ opts: config+opts together is a compile error")
+		passed = passed + 1
+	else
+		print("  ✗ opts: config+opts together compiled without error")
+		failed = failed + 1
+	end
+end
+
+-- main alone is inert (no config generated) but accepted
+do
+	local compiled = laze.compile({ { "test/main-only", main = "x" } })
+	if compiled.registry["main-only"].config == nil then
+		print("  ✓ main: accepted alone, generates no config")
+		passed = passed + 1
+	else
+		print("  ✗ main: generated config without opts")
+		failed = failed + 1
+	end
+end
+
+-- conflicting trigger merges warn instead of silently dropping (first wins)
+do
+	local msgs = {}
+	local orig_notify = vim.notify
+	vim.notify = function(msg, _)
+		table.insert(msgs, msg)
+	end
+	laze.compile({
+		{ "test/ev-a", event = { { event = "BufRead", pattern = "*.lua" } } },
+		{ "test/ev-b", event = { { event = "BufRead", pattern = "*.vim" } } },
+		{ "test/key-a", keys = { { lhs = "<leader>cc", rhs = ":A<CR>" } } },
+		{ "test/key-b", keys = { { lhs = "<leader>cc", rhs = ":B<CR>" } } },
+	})
+	vim.notify = orig_notify
+	local ev_warn, key_warn = false, false
+	for _, m in ipairs(msgs) do
+		if m:find("conflicting patterns", 1, true) then
+			ev_warn = true
+		end
+		if m:find("shared by multiple plugins", 1, true) then
+			key_warn = true
+		end
+	end
+	if ev_warn and key_warn then
+		print("  ✓ trigger conflicts: event-pattern and shared-lhs merges warn")
+		passed = passed + 1
+	else
+		print(("  ✗ trigger conflicts: event:%s keys:%s"):format(tostring(ev_warn), tostring(key_warn)))
+		failed = failed + 1
+	end
+end
+
 -- keys route: rhs string is replayed after the load; map opts preserved
 do
 	local lhs = vim.api.nvim_replace_termcodes("<leader>kr", true, false, true)
@@ -1541,51 +1801,15 @@ do
 end
 
 
--- extras: lock (pure pieces — no setup(), no auto-registered commands,
--- never required by the core). on_load/on_fail wiring is core API and is
--- exercised by the e2e test; no wrapper module needed.
+-- extras: opt-in modules are never required by the core.
+-- on_load/on_fail wiring is core API and is exercised by the e2e test;
+-- no wrapper module needed.
 do
-	-- core must not pull in extras: laze.lock must not be in
-	-- package.loaded before it is required explicitly.
-	if package.loaded["laze.lock"] ~= nil then
-		print("  ✗ core pulled in an opt-in module (laze.lock preloaded)")
-		failed = failed + 1
-	else
-		print("  ✓ core never requires opt-in modules (laze.lock untouched)")
-		passed = passed + 1
-	end
-
-	-- lock: hermetic write → apply round trip under a temp data dir
-	-- (LOCK_PATH is fixed at require time from stdpath("data")).
-	local lock_root = vim.fn.tempname()
-	vim.env.XDG_DATA_HOME = lock_root
-	local lock = require("laze.lock")
-	local lock_specs = { { "folke/lock-x.nvim", name = "lock-x", version = "1.2.3" } }
-	local noop = lock.apply(lock_specs)
-	if noop[1] == lock_specs[1] then
-		print("  ✓ laze.lock: apply with no lockfile returns specs untouched")
-		passed = passed + 1
-	else
-		print("  ✗ laze.lock: apply mutated specs without a lockfile")
-		failed = failed + 1
-	end
-	lock.write(lock.compile(lock_specs))
-	local re = lock.apply(lock_specs)
-	if re[1].commit == "1.2.3" and re[1] ~= lock_specs[1] then
-		print("  ✓ laze.lock: write → apply round trip injects commit into a copy")
-		passed = passed + 1
-	else
-		print("  ✗ laze.lock: round trip failed, commit=" .. tostring(re[1].commit))
-		failed = failed + 1
-	end
-	vim.env.XDG_DATA_HOME = nil
-	vim.fn.delete(lock_root, "rf")
-
-	-- lock is a pure piece: no auto-registered commands. Assert nothing
+	-- extras never auto-register commands. Assert nothing
 	-- leaks into the command table.
 	local cmds = vim.api.nvim_get_commands({})
 	local leaked = false
-	for _, name in ipairs({ "LazeProfile", "LazeRetry", "LazeLock", "LazeSync" }) do
+	for _, name in ipairs({ "LazeProfile", "LazeRetry", "LazeSync", "Laze" }) do
 		if cmds[name] then
 			leaked = true
 			print("  ✗ extras: unexpected command registered: :" .. name)
@@ -1595,6 +1819,71 @@ do
 	if not leaked then
 		print("  ✓ extras: pure wiring works, no Laze* commands auto-registered")
 		passed = passed + 1
+	end
+
+	-- extra: requiring registers nothing; setup() creates the commands.
+	-- core must not pull it in either.
+	if package.loaded["laze.extra"] ~= nil then
+		print("  ✗ core pulled in an opt-in module (laze.extra preloaded)")
+		failed = failed + 1
+	else
+		print("  ✓ core never requires opt-in modules (laze.extra untouched)")
+		passed = passed + 1
+	end
+	local extra = require("laze.extra")
+	if vim.api.nvim_get_commands({})["LazeHealth"] then
+		print("  ✗ extra: require registered commands without setup()")
+		failed = failed + 1
+	else
+		print("  ✓ extra: require alone registers nothing")
+		passed = passed + 1
+	end
+	extra.setup()
+	local laze_cmd = vim.api.nvim_get_commands({})["Laze"]
+	if not laze_cmd then
+		print("  ✗ extra: setup did not register :Laze")
+		failed = failed + 1
+	else
+		print("  ✓ extra: setup registers :Laze (update/clean/health/reload)")
+		passed = passed + 1
+	end
+	if pcall(vim.cmd, "Laze health") then
+		print("  ✓ extra: Laze health runs without error")
+		passed = passed + 1
+	else
+		print("  ✗ extra: Laze health threw")
+		failed = failed + 1
+	end
+	if pcall(vim.cmd, "Laze clean") then
+		print("  ✓ extra: Laze clean dry-run runs without error (never deletes without !)")
+		passed = passed + 1
+	else
+		print("  ✗ extra: Laze clean threw")
+		failed = failed + 1
+	end
+	do
+		local msgs = {}
+		local orig_notify = vim.notify
+		vim.notify = function(msg, _)
+			table.insert(msgs, msg)
+		end
+		local ok = pcall(vim.cmd, "Laze bogus")
+		vim.notify = orig_notify
+		if ok and #msgs == 1 and msgs[1]:find("unknown subcommand", 1, true) then
+			print("  ✓ extra: unknown subcommand warns instead of throwing")
+			passed = passed + 1
+		else
+			print("  ✗ extra: unknown subcommand misbehaved")
+			failed = failed + 1
+		end
+	end
+	local ok_clean, stale = pcall(extra.clean, false)
+	if ok_clean and type(stale) == "table" then
+		print("  ✓ extra: clean() is directly callable (custom wiring door)")
+		passed = passed + 1
+	else
+		print("  ✗ extra: direct clean() call failed")
+		failed = failed + 1
 	end
 end
 

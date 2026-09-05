@@ -365,6 +365,9 @@ local events_cases = {
 		{ { event = "BufEnter", pattern = "*.md" } },
 		"single event with pattern",
 	},
+	{ "BufRead", { { event = "BufReadPost" } }, "alias normalized to stored form" },
+	{ "BufWrite", { { event = "BufWritePre" } }, "alias normalized to stored form" },
+	{ "BufCreate", { { event = "BufAdd" } }, "alias normalized to stored form" },
 }
 
 for _, case in ipairs(events_cases) do
@@ -469,7 +472,7 @@ local rejection_cases = {
 	{ { "folke/x.nvim", name = "x", event = { { event = { "A", 42 } } } }, "must have event = string", "non-string in event array rejected" },
 	{ { "folke/x.nvim", name = "x", event = { { event = "BufEnter", pattern = 42 } } }, "pattern must be a string", "numeric pattern rejected" },
 	{ { "folke/x.nvim", name = "x", event = { "ok", {} } }, "event[2] must have event = string", "bare table in event rejected" },
-	{ { "folke/x.nvim", name = "x", config = true }, "config = true requires opts support", "config=true rejected" },
+	{ { "folke/x.nvim", name = "x", config = true }, "config = true is not supported", "config=true rejected" },
 	{ { "folke/x.nvim", name = "x", config = 42 }, "config must be a function", "non-function config rejected" },
 	{ { "folke/x.nvim", name = "x", init = 42 }, "init must be a function", "non-function init rejected" },
 	{ { "folke/x.nvim", name = "x", cond = "yes" }, "cond must be a function or boolean", "string cond rejected" },
@@ -621,16 +624,16 @@ do
 			"folke/x.nvim",
 			name = "x-unsup",
 			main = "m",
+			opts = { a = 1 },
 			submodules = false,
 			optional = true,
-			opts = {},
 			import = "lua/plugins",
 			lazy = true,
 			specs = {},
 		},
 	})
 	vim.notify = function() end
-	for _, field in ipairs({ "main", "submodules", "optional", "opts", "import", "lazy", "specs" }) do
+	for _, field in ipairs({ "submodules", "optional", "import", "lazy", "specs" }) do
 		local found = false
 		for _, m in ipairs(msgs) do
 			if m:find("'" .. field .. "'", 1, true) then
@@ -639,7 +642,16 @@ do
 		end
 		expect(found, "unsupported field '" .. field .. "' warns")
 	end
-	expect(#msgs == 7, "exactly one warning per unsupported field (got " .. #msgs .. ")")
+	for _, field in ipairs({ "main", "opts" }) do
+		local found = false
+		for _, m in ipairs(msgs) do
+			if m:find("'" .. field .. "'", 1, true) then
+				found = true
+			end
+		end
+		expect(not found, "supported field '" .. field .. "' does not warn")
+	end
+	expect(#msgs == 5, "exactly one warning per unsupported field (got " .. #msgs .. ")")
 end
 
 do

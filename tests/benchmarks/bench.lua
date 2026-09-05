@@ -1,5 +1,5 @@
 --- Benchmark: measure only plan registration (no plugin loading)
---- Run: nvim --cmd "set rtp+=." -l tests/bench.lua
+--- Run: nvim --cmd "set rtp+=." -l tests/benchmarks/bench.lua
 local laze = require("laze")
 local uv = vim.uv or vim.loop
 
