@@ -9,8 +9,8 @@ handling to Neovim's native `vim.pack`. Philosophy and output model:
 ## Scope
 
 Implements only a subset of lazy.nvim. Everything beyond the core
-(compile → plan → setup) is an opt-in module in `lua/laze/` (only
-`lock.lua`), never required by the core and free unless loaded.
+(compile → plan → setup) is an opt-in module in `lua/laze/` (`extra.lua`),
+never required by the core and free unless loaded.
 
 Supported spec fields: [README § Spec shape](README.md#spec-shape) —
 mechanically pinned by `tests/test_subset.lua` (every laze-consumed
@@ -31,7 +31,7 @@ Explicitly out of scope (do not add):
 lua/laze/init.lua      — Public API: compile(), build_plan(), setup(), reload_all()
 lua/laze/compile.lua   — Spec → IR transformation
 lua/laze/plan.lua      — Thin execution plan (trigger wiring, lazy loading)
-lua/laze/lock.lua      — Opt-in: lockfile pinning (apply/compile/write, pure)
+lua/laze/extra.lua      — Opt-in: :Laze subcommands (update/clean/health/reload) + public helpers
 docs/                  — design / extras / commands / migration / performance
 tests/run.lua              — Test runner incl. perf suite: nvim --cmd "set rtp+=." -l tests/run.lua [perf]
 tests/test_compile.lua     — Standalone unit tests (luajit tests/test_compile.lua)
@@ -69,6 +69,7 @@ Types (LuaCATS) are defined in code: `lua/laze/init.lua` (`LazeSpec`,
 
 ```sh
 nvim --cmd "set rtp+=." -l tests/run.lua        # integration (incl. spawned sessions + perf)
+nvim --cmd "set rtp+=." -l tests/run.lua fast   # single session (skips spawned startup/build/pkg tests)
 nvim --cmd "set rtp+=." -l tests/run.lua perf   # perf regression suite only
 luajit tests/test_compile.lua                   # unit, no nvim needed
 luajit tests/test_subset.lua                    # spec-surface conformance

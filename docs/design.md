@@ -32,9 +32,9 @@ Note: `:packadd` after startup also sources `ftdetect/`; during startup the runt
 
 Laze is installed and managed by `vim.pack` like any other plugin — but that
 does not mean it must be **loaded** through `vim.pack.add()` on every startup.
-`vim.pack.add` has a per-call fixed cost (~2 ms measured: filesystem checks
-plus runtimepath work, independent of plugin count), and paying it just to
-make one already-installed module requirable is waste.
+Skipping that call for an already-installed laze saves its per-plugin
+filesystem/placement checks and keeps one module requirable via a plain
+`rtp:prepend`.
 
 The cheap load pattern (used in the author's config):
 
@@ -71,9 +71,19 @@ machine/minute): startup median 43.9 ms → 41.0 ms with the pattern above.
 
 ## Notes
 
-* `vim.loader.enable()` should be called early.
+* `vim.loader.enable()` goes on the first line, before any `require`.
+  Only modules required *after* the call use the bytecode cache —
+  anything loaded before it pays full parse on every startup. Measured:
+  laze's own require ~2.7 ms → ~0.7 ms warm (one-time ~1 ms cache-write
+  tax per upgrade). The win is size-dependent: ~30 KB modules save
+  milliseconds, ~2 KB modules can cost more in cache overhead than they
+  save in parsing — so "early" matters precisely because the big modules
+  (manager, plugins) all load after init starts.
 * `vim.pack` is responsible for placement / installation.
 * Laze is responsible for timing and trigger wiring.
+* The core itself cannot be deferred to command time: eager activation
+  and trigger wiring are startup work by design (compare minpac, which
+  skips startup entirely by not wiring triggers at all).
 * The plugin itself is responsible for its own semantics.
 * Dev paths with `~` are expanded at compile time via `vim.fn.expand`. Absolute and relative paths pass through verbatim.
 

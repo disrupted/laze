@@ -3,31 +3,45 @@
 The core ships no commands and no runtime machinery. Everything beyond
 compile → plan → setup lives as an **optional module** in `lua/laze/`
 (it is never required by the core — load cost is zero unless you
-`require` it). Extras are pure pieces: no `setup()`, no auto-registered
-commands. You wire them explicitly into `laze.setup(specs, opts)` or
-your own commands.
+`require` it).
 
-## `laze.lock` — lockfile
+## `laze.extra` — maintenance commands
 
-Pins resolved commits to `stdpath("data")/laze/laze.lock` and applies them on later compiles.
+Explicit setup only — requiring the module registers nothing:
 
 ```lua
-local laze = require("laze")
-local lock = require("laze.lock")
-local compiled = laze.setup(lock.apply(specs))   -- lockfile applied at compile
+require("laze.extra").setup()
 ```
 
-Low-level pieces: `lock.apply(specs)`, `lock.compile(specs)`, `lock.write(compiled)`.
+One command with subcommands (lazy.nvim-style, tab-completed):
+
+| Subcommand     | Effect                                                      |
+| -------------- | ----------------------------------------------------------- |
+| `:Laze update` | `vim.pack.update()` for managed plugins                     |
+| `:Laze clean`  | list managed plugins missing from the last setup (dry-run)  |
+| `:Laze clean!` | delete them via `vim.pack.del`                              |
+| `:Laze health` | per-plugin setup/compile/install report                     |
+| `:Laze reload` | re-run the last `setup()` (dev loop)                        |
+
+`:Laze clean` without `!` never deletes — it prints the stale names so
+you can check them first. Unknown subcommands warn with the valid list
+instead of throwing.
+
+Prefer your own names? The commands are thin wrappers over public
+functions — wire them yourself instead of calling `setup()`:
 
 ```lua
--- sync-equivalent, as your own command (or in a one-shot call):
-vim.api.nvim_create_user_command("Sync", function()
-  local c = lock.compile(specs)
-  vim.pack.add(c.pack)
-  vim.pack.update()
-  lock.write(c)
-end, { desc = "Update plugins and write laze lockfile" })
-```
+local extra = require("laze.extra")
+-- extra.update() / extra.clean(true) / extra.health() / extra.reload()
+vim.api.nvim_create_user_command("Sync", function() extra.update() end, {})
+
+## Pinning versions (no code needed)
+
+`vim.pack` owns the lockfile natively (`$XDG_CONFIG_HOME/nvim/nvim-pack-lock.json`):
+it records each plugin's revision and installs at the locked revision on a
+fresh machine — verified end-to-end (fresh data dir + lockfile, no version
+pin → locked revision installed). Commit it to version control — that is
+the entire workflow.
 
 ## Manual wiring
 

@@ -1,6 +1,6 @@
 # Custom commands
 
-The core ships no commands and the [extras](extras.md) register none either — they are pure pieces. If you need plugin-manager-style commands, add your own against the compiled table returned by `setup`: 
+The core ships no commands; [`laze.extra`](extras.md) registers four maintenance commands but only on explicit `setup()`. For anything else, add your own against the compiled table returned by `setup`: 
 
 ## Sync (update all)
 
@@ -79,37 +79,25 @@ vim.api.nvim_create_user_command("LazeReloadAll", function()
 end, { desc = "Reload all plugins (fresh plan)" })
 ```
 
-## Deferring extras to command time
+## Pinning versions
 
-Extras cost 100–250 µs to load (measured), but if you want them all but
-*at startup* — minpac's "only load the manager when a command runs"
-trick — define the command yourself and `require` the extra inside it:
-
-```lua
--- Lockfile application must happen at compile time (startup), but
--- writing/holding the lockfile only needs the module when you run
--- the command. Split:
-local laze = require("laze")
-local lock_apply = require("laze.lock").apply  -- ~200µs at startup
-laze.setup(lock_apply(specs))
-
-vim.api.nvim_create_user_command("Lock", function()
-  local lock = require("laze.lock")   -- module loaded now, not at startup
-  local c = lock.compile(specs)
-  vim.pack.add(c.pack)
-  lock.write(c)
-end, { desc = "Write laze lockfile" })
-```
-
-The core itself cannot be deferred: it is responsible for eager
-activation and trigger wiring, which is startup work by design (compare
-minpac, which skips startup entirely by not wiring triggers at all).
+No recipe needed: `vim.pack` keeps its own lockfile
+(`$XDG_CONFIG_HOME/nvim/nvim-pack-lock.json`) and installs at the locked
+revision on a fresh machine. Commit it to version control — that is the
+entire workflow. (There is no laze lock module: the native lockfile covers
+pinning, verified end-to-end.)
 
 ## Store compiled IR for commands
 
 ```lua
 local compiled = laze.setup(specs)  -- setup returns the compiled table
 ```
+
+Note: never feed `compiled.pack` to a raw `vim.pack.add()` at startup —
+it `:packadd`s everything and bypasses lazy triggers. Startup must go
+through `laze.setup()`, which splits eager (`load = false`) from lazy
+(no-op `load`). A raw add is only safe in manually-run maintenance
+commands, where sourcing everything immediately is the point.
 
 ## Sandbox testing
 

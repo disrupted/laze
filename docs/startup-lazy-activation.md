@@ -1,5 +1,9 @@
 # Startup lazy activation
 
+Status: implemented (plan.lua) and tested (spawned-session tests in
+tests/run.lua). This doc keeps the original problem analysis and the
+design rationale; "proposed"/"verification" phrasing below is historical.
+
 ## Problem
 
 `laze.setup()` may run while `vim.v.vim_did_enter == 0`. A lazy plugin can
@@ -86,6 +90,15 @@ For `cmd` triggers, retain the temporary startup command proxy already added:
 The proxy must be removed if the plugin did not define the advertised command,
 so the replay reports the actual missing-command error instead of re-queuing.
 
+Known limitation (measured 2026-09, Neovim core behavior, not laze's
+serialization): when the retried invocation carries quoted/space-containing
+arguments (`:Cmd "x y"`), the retry reaches the proxy with arguments already
+empty — the information is lost before laze sees it, so no replay encoding
+can recover it. Escaped bars (`:Cmd a\|b`) round-trip fine, and post-startup
+invocations are unaffected (quoted args arrive intact). If a startup autocmd
+must pass quoted args to a lazy command, wrap the call in your own `VimEnter`
+autocmd instead of relying on the proxy replay.
+
 ## State model
 
 `loaded[id]` currently uses `nil`, `true`, and `"failed"`. Extend the
@@ -125,7 +138,7 @@ Replaying the current `FileType` route fixes events that happened before
 The package can still be added with `:packadd!` without its plugin files being
 sourced.
 
-## Verification
+## Verification (done — covered by spawned-session tests in tests/run.lua)
 
 Add spawned-session tests covering both fresh-install and warm-package runs:
 

@@ -70,7 +70,7 @@ Or just one call if you have specs elsewhere:
 local compiled = laze.setup(specs)   -- compile + vim.pack.add + plan(), returns compiled
 ```
 
-`setup()` returns the compiled IR (`LazeCompiled`). You can hand it to [`laze.build_plan`](#instrumenting-load-time) for hooks like load-time timings, to [`lock.apply`](docs/extras.md) for lockfile pinning, or just keep it around for inspection — otherwise ignore it.
+`setup()` returns the compiled IR (`LazeCompiled`). You can hand it to [`laze.build_plan`](#instrumenting-load-time) for hooks like load-time timings, or just keep it around for inspection — otherwise ignore it. Pinning needs no code: commit `vim.pack`'s own lockfile (`$XDG_CONFIG_HOME/nvim/nvim-pack-lock.json`).
 
 That's it. Everything else in laze is declarative spec fields, opt-in extras, and your own commands — [see below](#spec-shape).
 
@@ -93,10 +93,14 @@ Supported fields:
 * `enabled`
 * `silent`
 * `version`
+* `branch` / `tag` / `commit` — folded into `version` (most specific wins)
+* `pin` — passed through to `vim.pack.Spec`
 * `data`
 * `after`
 * `dependencies`
 * `module` — module name(s) that trigger lazy load on `require`
+* `main` — module name for `opts` (explicit; never guessed from the repo)
+* `opts` — table passed to `require(main).setup(opts)` at load (requires `main`)
 * `build` — build command or function (passed to `vim.pack`)
 * `priority` — eager plugin load order: higher loads first, tie-break by id (default 50)
 * `dev_path` — local path for dev mode (used by your own commands)
@@ -119,7 +123,7 @@ Notes:
 * `dir` plugins are **local**: they are excluded from the `pack` array (vim.pack never installs or manages them) and the plan loads them at trigger/eager time by prepending the exact directory path to `'runtimepath'`. This mirrors lazy.nvim's `dir` behavior — the directory must already exist on disk.
 * `url` takes priority over `[1]` and auto-detected URLs.
 * `keys = { { lhs = "<leader>x" } }` without `rhs` is a *takeover* trigger: the plugin's own keymap for that lhs replaces laze's after load. The replay expands `<leader>` with the **current** `g:mapleader` — set it before `laze.setup()` and don't change it mid-session (the plugin's map is created with whatever leader was active at registration).
-* Triggers (`event`/`ft`/`cmd`/`keys`) accept `string` or `string[]`; `event` additionally accepts lazy.nvim's `{ event, pattern }[]` form and `keys` accepts `{ lhs, mode?, rhs?, desc?, silent? }` entries (`mode` may be a `string[]`). **Function-shaped triggers are rejected with a compile error** — laze has no runtime trigger evaluation, and silently treating them as "no trigger" would turn the plugin eager.
+* Triggers (`event`/`ft`/`cmd`/`keys`) accept `string` or `string[]`; `event` additionally accepts lazy.nvim's `{ event, pattern }[]` form and `keys` accepts `{ lhs, mode?, rhs?, desc?, silent? }` entries (`mode` may be a `string[]`). Event names use Neovim's stored form — aliases are normalized at compile time (`BufRead`→`BufReadPost`, `BufCreate`→`BufAdd`, `BufWrite`→`BufWritePre`, same mapping `nvim_create_autocmd` applies). **Function-shaped triggers are rejected with a compile error** — laze has no runtime trigger evaluation, and silently treating them as "no trigger" would turn the plugin eager.
 
 ## `module` — module-triggered lazy load
 
@@ -160,7 +164,7 @@ Passed directly to `vim.pack.Spec`.
 }
 ```
 
-`dev = true` or a string re-points the install source at your local clone. `~` expands; absolute and relative paths pass through verbatim. `dev_path` is inert metadata — see [Custom commands](docs/commands.md) for sync / dev-mode / hot-reload recipes.
+`dev = true` or a string re-points the install source at your local clone. `~` expands; absolute and relative paths pass through verbatim. `dev_path` is a fallback source with the same effect when `dev` is unset — see [Custom commands](docs/commands.md) for sync / dev-mode / hot-reload recipes.
 
 ## `VeryLazy`
 
@@ -187,10 +191,11 @@ laze.build_plan(compiled, {
 ## Further reading
 
 * [Design: output model, activation invariant, philosophy](docs/design.md)
-* [Extras: lockfile pinning](docs/extras.md)
+* [Extras: maintenance commands](docs/extras.md)
 * [Custom commands: sync, dev mode, hot reload, sandbox](docs/commands.md)
 * [Migrating from lazy.nvim](docs/migration.md)
 * [Performance: measured numbers, resolved items, accepted trade-offs](docs/performance.md)
+* [What laze doesn't have (and won't)](docs/not-have.md)
 
 ## License and credits
 
