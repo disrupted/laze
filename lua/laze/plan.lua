@@ -252,7 +252,7 @@ local function build_plan(compiled, opts)
 			end
 		end
 
-		if during_startup and (entry.has_route or entry.is_dep) then
+		if during_startup and entry.lazy ~= false and (entry.is_dep or entry.has_route) then
 			loaded[id] = "pending_startup"
 			startup_pending[id] = { entry = entry, dir = plugin_dir, start = start }
 			table.insert(startup_pending_order, id)
@@ -626,7 +626,7 @@ local function build_plan(compiled, opts)
 		-- (`is_dep`) are excluded: they load via their parents instead.
 		local eager = {}
 		for _, entry in pairs(registry) do
-			if enabled_ok[entry.id] and not entry.has_route and not entry.is_dep then
+			if enabled_ok[entry.id] and (entry.lazy == false or (not entry.has_route and not entry.is_dep)) then
 				table.insert(eager, entry)
 			end
 		end

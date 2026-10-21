@@ -348,7 +348,6 @@ local UNSUPPORTED_FIELDS = {
 	submodules = "no equivalent; vim.pack fetches submodules by default",
 	optional = "deps are always required; remove 'optional'",
 	import = "lazy.nvim-only; load spec files yourself and pass the tables to setup",
-	lazy = "no equivalent; plugins without triggers are eager",
 	specs = "no equivalent; inline your specs instead",
 }
 
@@ -593,6 +592,9 @@ local function validate_spec(spec, idx, warned)
 			0
 		)
 	end
+	if spec.lazy ~= nil and type(spec.lazy) ~= "boolean" then
+		error("spec [" .. idx .. "] (" .. spec_id .. "): lazy must be a boolean", 0)
+	end
 
 	validate_triggers(spec, idx, spec_id)
 end
@@ -807,6 +809,7 @@ function compile(specs, opts)
 				config = config,
 				cond = spec.cond,
 				enabled = enabled,
+				lazy = spec.lazy,
 				after = after,
 				build = build,
 				module = spec.module,
@@ -856,6 +859,7 @@ function compile(specs, opts)
 			config = norm.config,
 			cond = norm.cond,
 			enabled = norm.enabled,
+			lazy = norm.lazy,
 			after = norm.after,
 			silent = spec.silent == true,
 			build = norm.build,

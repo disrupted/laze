@@ -23,6 +23,7 @@
 ---@field config? fun()
 ---@field cond? fun(): boolean|boolean
 ---@field enabled? fun(): boolean|boolean
+---@field lazy? boolean
 ---@field silent? boolean
 ---@field priority? number
 ---@field after? string[]
@@ -186,7 +187,7 @@ function M.setup(specs, opts)
 	local lazy_pack = {}
 	for _, spec in ipairs(compiled.pack) do
 		local entry = compiled.registry[pkg_to_id[spec.name]]
-		if entry.has_route or entry.is_dep then
+		if entry.lazy ~= false and (entry.is_dep or entry.has_route) then
 			table.insert(lazy_pack, spec)
 		else
 			table.insert(eager_pack, spec)
