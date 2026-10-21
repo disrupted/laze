@@ -267,43 +267,37 @@ local function add_to_event_route(route_map, events, plugin_id)
 	end
 end
 
---- Same lhs from two specs: the trigger map is shared, so mode/rhs/desc/
---- silent must agree — warn and keep the first instead of silently
---- dropping the second spec's values.
-local function same_mode(a, b)
-	if type(a) ~= type(b) then
-		return false
-	end
-	if type(a) ~= "table" then
-		return a == b
-	end
-	if #a ~= #b then
-		return false
-	end
-	for i = 1, #a do
-		if a[i] ~= b[i] then
-			return false
-		end
-	end
-	return true
-end
-
+--- Same (lhs, mode) from two specs: the trigger map is shared, so
+--- rhs/desc/silent must agree — warn and keep the first instead of
+--- silently dropping the second spec's values. Different modes for the
+--- same lhs are separate routes (e.g. <C-e> in insert vs normal mode).
 local function add_to_key_route(route_map, keys, plugin_id)
 	for i = 1, #keys do
 		local ke = keys[i]
 		local lhs = ke.lhs
-		if not route_map[lhs] then
-			route_map[lhs] = { mode = ke.mode, ids = {}, rhs = ke.rhs, desc = ke.desc, silent = ke.silent }
-		else
-			local cur = route_map[lhs]
-			if not same_mode(cur.mode, ke.mode) or cur.rhs ~= ke.rhs or cur.desc ~= ke.desc or cur.silent ~= ke.silent then
-				vim.notify(
-					("laze: keys %q is shared by multiple plugins with different mode/rhs/opts — keeping the first"):format(lhs),
-					vim.log.levels.WARN
-				)
+		local modes = type(ke.mode) == "table" and ke.mode or { ke.mode }
+		for _, mode in ipairs(modes) do
+			local route_key = lhs .. "\0" .. mode
+			if not route_map[route_key] then
+				route_map[route_key] = {
+					lhs = lhs,
+					mode = mode,
+					ids = {},
+					rhs = ke.rhs,
+					desc = ke.desc,
+					silent = ke.silent,
+				}
+			else
+				local cur = route_map[route_key]
+				if cur.rhs ~= ke.rhs or cur.desc ~= ke.desc or cur.silent ~= ke.silent then
+					vim.notify(
+						("laze: keys %q (mode %s) is shared by multiple plugins with different rhs/opts — keeping the first"):format(lhs, mode),
+						vim.log.levels.WARN
+					)
+				end
 			end
+			table.insert(route_map[route_key].ids, plugin_id)
 		end
-		table.insert(route_map[lhs].ids, plugin_id)
 	end
 end
 

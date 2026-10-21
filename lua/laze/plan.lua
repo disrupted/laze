@@ -585,11 +585,12 @@ local function build_plan(compiled, opts)
 			})
 		end
 
-		for lhs, entry in pairs(routes.keys) do
-			local modes = type(entry.mode) == "table" and entry.mode or { entry.mode }
+		for _, entry in pairs(routes.keys) do
+			local lhs = entry.lhs
+			local mode = entry.mode
 			local ids = entry.ids
 			local rhs = entry.rhs
-			for _, mode in ipairs(modes) do
+			do
 				local keymap_opts = { desc = entry.desc or "laze: load on key" }
 				if entry.silent ~= nil then
 					keymap_opts.silent = entry.silent
