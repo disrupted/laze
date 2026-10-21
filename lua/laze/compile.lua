@@ -203,12 +203,27 @@ local function resolve_version(spec)
 		-- lazy.nvim: false = "use default branch" → nil here (vim.pack default)
 		return nil
 	end
+	-- A `vim.version.range()` object passes straight through to vim.pack.
+	if type(v) == "table" then
+		return v
+	end
 	if v == "*" then
 		-- lazy.nvim: "*" = "latest tag". vim.pack honors VersionRange against tags.
 		if vim.version and vim.version.range then
 			return vim.version.range("*")
 		end
 		return nil
+	end
+	-- Semver range strings ("v2.*", ">=1.0", "^1.2", "1.2 || 1.3") become
+	-- vim.pack VersionRanges. Branch/tag/commit strings carry no range
+	-- operator and stay plain strings.
+	if type(v) == "string" and v:find("[%*%^~<>=|,]") then
+		if vim.version and vim.version.range then
+			local ok, range = pcall(vim.version.range, v)
+			if ok then
+				return range
+			end
+		end
 	end
 	if v ~= nil then
 		return v
@@ -573,8 +588,16 @@ local function validate_spec(spec, idx, warned)
 	if spec.priority ~= nil and type(spec.priority) ~= "number" then
 		error("spec [" .. idx .. "] (" .. spec_id .. "): priority must be a number", 0)
 	end
-	if spec.version ~= nil and type(spec.version) ~= "string" and spec.version ~= false then
-		error("spec [" .. idx .. "] (" .. spec_id .. "): version must be a string (semver range) or false", 0)
+	if
+		spec.version ~= nil
+		and type(spec.version) ~= "string"
+		and type(spec.version) ~= "table"
+		and spec.version ~= false
+	then
+		error(
+			"spec [" .. idx .. "] (" .. spec_id .. "): version must be a string, vim.version.range(), or false",
+			0
+		)
 	end
 
 	validate_triggers(spec, idx, spec_id)
