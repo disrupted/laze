@@ -116,6 +116,20 @@ local function build_plan(compiled, opts)
 		end
 	end
 
+	-- Re-fire an event after a trigger load, so autocmds the plugin registers
+	-- while loading see the event/buffer that caused the load (e.g. an ft
+	-- plugin's FileType handler missing the buffer). Re-entrancy is guarded so
+	-- the trigger dispatcher itself doesn't recurse.
+	local refiring = {}
+	local function refire_event(event, buf)
+		if refiring[event] then
+			return
+		end
+		refiring[event] = true
+		pcall(vim.api.nvim_exec_autocmds, event, { buffer = buf, modeline = false })
+		refiring[event] = nil
+	end
+
 	local function run_hooks(id, entry, start)
 		-- `init` is not run here: it runs once at startup (lazy.nvim parity),
 		-- before any plugin loads. See the startup pass at the top of the
@@ -154,6 +168,11 @@ local function build_plan(compiled, opts)
 				end
 				run_hooks(id, pending.entry, pending.start)
 			end
+		end
+		-- Startup-requested ft plugins registered their autocmds during
+		-- finalization; re-fire FileType so they see the current buffer.
+		if next(routes.fts) and routes.fts[vim.bo.filetype] then
+			refire_event("FileType", vim.api.nvim_get_current_buf())
 		end
 	end
 
@@ -517,6 +536,7 @@ local function build_plan(compiled, opts)
 							for _, id in ipairs(entry.ids) do
 								load_with_deps(id)
 							end
+							refire_event(ev.event, ev.buf)
 						end
 					end,
 				})
@@ -539,6 +559,7 @@ local function build_plan(compiled, opts)
 						for _, id in ipairs(current_ids) do
 							load_with_deps(id)
 						end
+						refire_event("FileType", ev.buf)
 					end
 				end,
 			})
