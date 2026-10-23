@@ -39,7 +39,7 @@ local function build_rtp_index(data_dir)
 end
 
 ---@param compiled LazeCompiled
----@param opts? { on_load?: fun(id: string, time_ms: number), on_fail?: fun(id: string, err: string) }
+---@param opts?    { on_load?: fun(id: string, time_ms: number), on_fail?: fun(id: string, err: string) }
 ---@return LazePlan
 local function build_plan(compiled, opts)
 	opts = opts or {}
@@ -66,6 +66,23 @@ local function build_plan(compiled, opts)
 	local startup_finalizer_installed = false
 	local startup_cmd_calls = {}
 	local startup_cmd_proxy_desc = "laze: defer command until VimEnter"
+
+	-- Neovim's startup plugin/ phase sources every directory on 'runtimepath'
+	-- when it begins. Packs activated before that point are sourced by Neovim
+	-- itself; packs activated during/after it must be sourced by the VimEnter
+	-- finalizer. Track the transition so finalize never double-sources.
+	local startup_plugin_phase_started = false
+	if vim.v.vim_did_enter == 0 then
+		local marker
+		marker = vim.api.nvim_create_autocmd("SourcePre", {
+			callback = function (ev)
+				if ev.match:find("[/\\]plugin[/\\]") then
+					startup_plugin_phase_started = true
+					pcall(vim.api.nvim_del_autocmd, marker)
+				end
+			end
+		})
+	end
 
 	-- Resolve `enabled` once at plan build time: lazy.nvim allows a function
 	-- that is evaluated when the spec is processed. A function returning
@@ -130,38 +147,52 @@ local function build_plan(compiled, opts)
 		refiring[event] = nil
 	end
 
-	local function run_hooks(id, entry, start)
+	local function run_hooks(id, entry, start, opts)
+		opts = opts or {}
 		-- `init` is not run here: it runs once at startup (lazy.nvim parity),
 		-- before any plugin loads. See the startup pass at the top of the
 		-- returned plan function.
 		local modules = entry.module
-		if type(modules) == "string" then modules = { modules } end
+		if type(modules) == "string" then
+			modules = { modules }
+		end
 		if type(modules) == "table" then
-			local ok_req, err_req = pcall(function()
-				for _, mod in ipairs(modules) do original_require(mod) end
+			local ok_req, err_req = pcall(function ()
+				for _, mod in ipairs(modules) do
+					original_require(mod)
+				end
 			end)
 			if not ok_req then
 				loaded[id] = "failed"
-				if not entry.silent then vim.notify("laze: failed to load " .. id .. ": " .. tostring(err_req), vim.log.levels.WARN) end
+				if not entry.silent then
+					vim.notify("laze: failed to load " .. id .. ": " .. tostring(err_req), vim.log.levels.WARN)
+				end
 				if on_fail then on_fail(id, err_req) end
 				return
 			end
 		end
-		if entry.config then
+		local pending = startup_pending[id]
+		if entry.config and not (pending and pending.config_ran) then
 			local ok_cfg, err_cfg = pcall(entry.config)
-			if not ok_cfg then vim.notify("laze: config failed for " .. id .. ": " .. tostring(err_cfg), vim.log.levels.WARN) end
+			if not ok_cfg then
+				vim.notify("laze: config failed for " .. id .. ": " .. tostring(err_cfg), vim.log.levels.WARN)
+			end
+			if pending then pending.config_ran = true end
 		end
-		loaded[id] = true
-		if on_load and start then on_load(id, (vim.uv.hrtime() - start) / 1e6) end
+		if not opts.partial then
+			loaded[id] = true
+			if on_load and start then on_load(id, (vim.uv.hrtime() - start) / 1e6) end
+		end
 	end
 
 	local function finalize_startup_pending()
 		for _, id in ipairs(startup_pending_order) do
 			local pending = startup_pending[id]
 			if pending and loaded[id] == "pending_startup" then
-				-- `:packadd!` deliberately skipped these files. Lazy opt packages
-				-- can be added after Neovim's startup scan, so source them now.
-				if pending.dir then
+				-- `:packadd!` deliberately skipped these files. Packs added
+				-- before Neovim's startup plugin/ phase are sourced by that
+				-- phase; only late additions need manual sourcing here.
+				if pending.dir and pending.source_later then
 					source_glob(pending.dir, "/plugin/**/*.{lua,vim}")
 					source_glob(pending.dir, "/ftdetect/*.vim")
 					source_after_plugin(pending.dir)
@@ -267,7 +298,13 @@ local function build_plan(compiled, opts)
 
 		if during_startup and entry.lazy ~= false and (entry.is_dep or entry.has_route) then
 			loaded[id] = "pending_startup"
-			startup_pending[id] = { entry = entry, dir = plugin_dir, start = start }
+			startup_pending[id] = {
+				entry = entry,
+				dir = plugin_dir,
+				start = start,
+				config_ran = false,
+				source_later = startup_plugin_phase_started
+			}
 			table.insert(startup_pending_order, id)
 			if not startup_finalizer_installed then
 				startup_finalizer_installed = true
@@ -318,10 +355,7 @@ local function build_plan(compiled, opts)
 					local has_cycle = false
 					for j = 1, depth do
 						if stack[j] == dep then
-							vim.notify(
-								("laze: cycle in after deps (%s)"):format(dep),
-								vim.log.levels.WARN
-							)
+							vim.notify(("laze: cycle in after deps (%s)"):format(dep), vim.log.levels.WARN)
 							has_cycle = true
 							break
 						end
@@ -367,26 +401,30 @@ local function build_plan(compiled, opts)
 			return
 		end
 		startup_cmd_calls[cmd] = {}
-		vim.api.nvim_create_user_command(cmd, function(command)
-			local range = ""
-			if command.range == 2 then
-				range = ("%d,%d"):format(command.line1, command.line2)
-			elseif command.range == 1 then
-				range = tostring(command.line1)
-			end
-			local modifiers = command.mods ~= "" and (command.mods .. " ") or ""
-			local args = command.args ~= "" and (" " .. command.args) or ""
-			table.insert(startup_cmd_calls[cmd], modifiers .. range .. cmd .. (command.bang and "!" or "") .. args)
-		end, {
-			nargs = "*",
-			bang = true,
-			range = true,
-			bar = true,
-			desc = startup_cmd_proxy_desc,
-		})
+		vim.api.nvim_create_user_command(
+			cmd,
+			function (command)
+				local range = ""
+				if command.range == 2 then
+					range = ("%d,%d"):format(command.line1, command.line2)
+				elseif command.range == 1 then
+					range = tostring(command.line1)
+				end
+				local modifiers = command.mods ~= "" and (command.mods .. " ") or ""
+				local args = command.args ~= "" and (" " .. command.args) or ""
+				table.insert(startup_cmd_calls[cmd], modifiers .. range .. cmd .. (command.bang and "!" or "") .. args)
+			end,
+			{
+				nargs = "*",
+				bang = true,
+				range = true,
+				bar = true,
+				desc = startup_cmd_proxy_desc
+			}
+		)
 		vim.api.nvim_create_autocmd("VimEnter", {
 			once = true,
-			callback = function()
+			callback = function ()
 				local calls = startup_cmd_calls[cmd]
 				startup_cmd_calls[cmd] = nil
 				-- A plugin's `:command!` normally replaces this proxy during the
@@ -401,7 +439,7 @@ local function build_plan(compiled, opts)
 				for _, call in ipairs(calls or {}) do
 					pcall(vim.cmd, call)
 				end
-			end,
+			end
 		})
 	end
 
@@ -422,7 +460,7 @@ local function build_plan(compiled, opts)
 	end
 	for modname, ids in pairs(routes.modules or {}) do
 		installed_preloads[modname] = true
-		package.preload[modname] = function()
+		package.preload[modname] = function ()
 			package.preload[modname] = nil
 			installed_preloads[modname] = nil
 			-- Nvim's require holds an in-flight sentinel in
@@ -434,11 +472,22 @@ local function build_plan(compiled, opts)
 			for _, id in ipairs(ids) do
 				load_with_deps(id)
 			end
-			return original_require(modname)
+			local mod = original_require(modname)
+			for _, id in ipairs(ids) do
+				local pending = loaded[id] == "pending_startup" and startup_pending[id]
+				if pending and not pending.config_ran then
+					-- A module consumer needs a configured plugin before
+					-- require() returns. Run config now; plugin/ scripts are
+					-- still left to the startup phase / VimEnter finalizer,
+					-- so the activation invariant (source exactly once) holds.
+					run_hooks(id, pending.entry, pending.start, { partial = true })
+				end
+			end
+			return mod
 		end
 	end
 
-	return function()
+	return function ()
 		-- lazy.nvim parity: `init` runs once at startup for every enabled
 		-- plugin, before any plugin is loaded, so `init` can register
 		-- which-key specs, set options, etc. regardless of when the plugin
@@ -448,8 +497,7 @@ local function build_plan(compiled, opts)
 				local ok_init, err_init = pcall(entry.init)
 				if not ok_init then
 					vim.notify(
-						("laze: init failed for %s: %s"):format(entry.id, tostring(err_init)),
-						vim.log.levels.WARN
+						("laze: init failed for %s: %s"):format(entry.id, tostring(err_init)), vim.log.levels.WARN
 					)
 				end
 			end
@@ -488,9 +536,9 @@ local function build_plan(compiled, opts)
 		vim.api.nvim_create_autocmd("UIEnter", {
 			group = events_group,
 			once = true,
-			callback = function()
+			callback = function ()
 				vim.api.nvim_exec_autocmds("User", { pattern = "VeryLazy" })
-			end,
+			end
 		})
 
 		if next(routes.events) then
@@ -508,11 +556,11 @@ local function build_plan(compiled, opts)
 						group = group,
 						pattern = "VeryLazy",
 						once = true,
-						callback = function()
+						callback = function ()
 							for _, id in ipairs(ev.ids) do
 								load_with_deps(id)
 							end
-						end,
+						end
 					})
 				else
 					local key = ev.pattern or ""
@@ -530,7 +578,7 @@ local function build_plan(compiled, opts)
 					group = group,
 					pattern = b.pattern,
 					once = true,
-					callback = function(ev)
+					callback = function (ev)
 						local entry = routes.events[ev.event]
 						if entry then
 							for _, id in ipairs(entry.ids) do
@@ -538,7 +586,7 @@ local function build_plan(compiled, opts)
 							end
 							refire_event(ev.event, ev.buf)
 						end
-					end,
+					end
 				})
 			end
 		end
@@ -553,7 +601,7 @@ local function build_plan(compiled, opts)
 			vim.api.nvim_create_autocmd("FileType", {
 				group = group,
 				pattern = "*",
-				callback = function(ev)
+				callback = function (ev)
 					local current_ids = routes.fts[ev.match]
 					if current_ids then
 						for _, id in ipairs(current_ids) do
@@ -561,7 +609,7 @@ local function build_plan(compiled, opts)
 						end
 						refire_event("FileType", ev.buf)
 					end
-				end,
+				end
 			})
 
 			-- A file passed on Neovim's command line can receive its FileType
@@ -589,7 +637,7 @@ local function build_plan(compiled, opts)
 				vim.api.nvim_create_autocmd("VimEnter", {
 					group = group,
 					once = true,
-					callback = load_current_ft,
+					callback = load_current_ft
 				})
 			end
 		end
@@ -602,7 +650,7 @@ local function build_plan(compiled, opts)
 			vim.api.nvim_create_autocmd("CmdUndefined", {
 				group = group,
 				pattern = "*",
-				callback = function(ev)
+				callback = function (ev)
 					local ids = routes.cmds[ev.match]
 					if not ids then
 						return
@@ -613,7 +661,7 @@ local function build_plan(compiled, opts)
 					if vim.v.vim_did_enter == 0 then
 						defer_startup_command(ev.match)
 					end
-				end,
+				end
 			})
 		end
 
@@ -628,7 +676,7 @@ local function build_plan(compiled, opts)
 					keymap_opts.silent = entry.silent
 				end
 				table.insert(installed_keys, { mode = mode, lhs = lhs, desc = keymap_opts.desc })
-				vim.keymap.set(mode, lhs, function()
+				vim.keymap.set(mode, lhs, function ()
 					if rhs == nil then
 						-- No rhs: the plugin's own keymap takes over after load.
 						-- Delete the trigger NOW — at this point it is the only
@@ -649,7 +697,8 @@ local function build_plan(compiled, opts)
 					else
 						vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes(rhs, true, false, true), "", true)
 					end
-				end, keymap_opts)
+				end, keymap_opts
+				)
 			end
 		end
 
@@ -663,7 +712,7 @@ local function build_plan(compiled, opts)
 			end
 		end
 		if #eager > 1 then
-			table.sort(eager, function(a, b)
+			table.sort(eager, function (a, b)
 				local pa = a.priority or 50
 				local pb = b.priority or 50
 				if pa ~= pb then

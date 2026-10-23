@@ -45,10 +45,7 @@ local function deep_compare(got, expected, path)
 	if type(got) ~= type(expected) then
 		error(
 			("  %s: type mismatch — expected %s, got %s (%s)"):format(
-				path,
-				type(expected),
-				type(got),
-				vim.inspect(got)
+				path, type(expected), type(got), vim.inspect(got)
 			)
 		)
 	end
@@ -92,28 +89,9 @@ end
 print("=== compile tests ===\n")
 
 local compile_fixtures = {
-	"basic",
-	"dev_key",
-	"disabled",
-	"after_deps",
-	"name_override",
-	"dir_source",
-	"dependencies",
-	"silent",
-	"cond",
-	"version_data",
-	"unknown_fields",
-	"module_trigger",
-	"build_dev",
-	"keys_rhs",
-	"version_convert",
-	"deps_dedup",
-	"event_pattern",
-	"keys_opts",
-	"cond_enabled",
-	"name_derivation",
-	"priority_build",
-	"opts_main",
+	"basic", "dev_key", "disabled", "after_deps", "name_override", "dir_source", "dependencies", "silent", "cond",
+	"version_data", "unknown_fields", "module_trigger", "build_dev", "keys_rhs", "version_convert", "deps_dedup",
+	"event_pattern", "keys_opts", "cond_enabled", "name_derivation", "priority_build", "opts_main"
 }
 
 for _, name in ipairs(compile_fixtures) do
@@ -204,14 +182,14 @@ end
 do
 	local ran = 0
 	local compiled = laze.compile({
-		{ "test/cmd-plugin", cmd = "LazyCmdTest", name = "cmd-test", config = function() ran = ran + 1 end },
+		{ "test/cmd-plugin", cmd = "LazyCmdTest", name = "cmd-test", config = function () ran = ran + 1 end }
 	})
 	local plan = laze.build_plan(compiled)
 	plan()
 
 	local aucmds = vim.api.nvim_get_autocmds({
 		event = "CmdUndefined",
-		group = "laze_cmds",
+		group = "laze_cmds"
 	})
 
 	if #aucmds == 1 and aucmds[1].pattern == "*" then
@@ -237,14 +215,14 @@ end
 do
 	local ran = 0
 	local compiled = laze.compile({
-		{ "test/ft-plugin", ft = "myfttest", config = function() ran = ran + 1 end },
+		{ "test/ft-plugin", ft = "myfttest", config = function () ran = ran + 1 end }
 	})
 	local plan = laze.build_plan(compiled)
 	plan()
 
 	local aucmds = vim.api.nvim_get_autocmds({
 		event = "FileType",
-		group = "laze_fts",
+		group = "laze_fts"
 	})
 
 	if #aucmds == 1 and aucmds[1].pattern == "*" then
@@ -273,7 +251,7 @@ end
 -- keys route: keymap is registered
 do
 	local compiled = laze.compile({
-		{ "test/key-plugin", keys = "<leader>zz" },
+		{ "test/key-plugin", keys = "<leader>zz" }
 	})
 	local plan = laze.build_plan(compiled)
 	plan()
@@ -300,7 +278,7 @@ end
 -- keys route: explicit mode
 do
 	local compiled = laze.compile({
-		{ "test/key-i", keys = { { lhs = "<leader>ii", mode = "i" } } },
+		{ "test/key-i", keys = { { lhs = "<leader>ii", mode = "i" } } }
 	})
 	local plan = laze.build_plan(compiled)
 	plan()
@@ -330,7 +308,7 @@ end
 -- keys route: multiple modes
 do
 	local compiled = laze.compile({
-		{ "test/key-multi", keys = { { lhs = "<leader>mm", mode = { "n", "v" } } } },
+		{ "test/key-multi", keys = { { lhs = "<leader>mm", mode = { "n", "v" } } } }
 	})
 	local plan = laze.build_plan(compiled)
 	plan()
@@ -374,12 +352,12 @@ do
 			dir = dir,
 			name = "key-takeover",
 			keys = { { lhs = "<leader>kt" } },
-			config = function()
-				vim.keymap.set("n", "<leader>kt", function()
+			config = function ()
+				vim.keymap.set("n", "<leader>kt", function ()
 					ran = true
 				end)
-			end,
-		},
+			end
+		}
 	})
 	local plan = laze.build_plan(compiled)
 	plan()
@@ -405,14 +383,14 @@ end
 -- event route: autocmd is registered
 do
 	local compiled = laze.compile({
-		{ "test/event-plugin", event = "BufRead" },
+		{ "test/event-plugin", event = "BufRead" }
 	})
 	local plan = laze.build_plan(compiled)
 	plan()
 
 	local aucmds = vim.api.nvim_get_autocmds({
 		event = "BufRead",
-		group = "laze_events",
+		group = "laze_events"
 	})
 
 	if #aucmds == 1 then
@@ -429,8 +407,8 @@ end
 do
 	local ran_a, ran_b = 0, 0
 	local compiled = laze.compile({
-		{ "test/ev-a", event = "BufRead", config = function() ran_a = ran_a + 1 end },
-		{ "test/ev-b", event = "InsertEnter", config = function() ran_b = ran_b + 1 end },
+		{ "test/ev-a", event = "BufRead", config = function () ran_a = ran_a + 1 end },
+		{ "test/ev-b", event = "InsertEnter", config = function () ran_b = ran_b + 1 end }
 	})
 	local plan = laze.build_plan(compiled)
 	plan()
@@ -462,7 +440,7 @@ end
 do
 	local ran = 0
 	local c1 = laze.compile({
-		{ dir = vim.fn.tempname(), name = "stale-ev", event = "BufReadPost", config = function() ran = ran + 1 end },
+		{ dir = vim.fn.tempname(), name = "stale-ev", event = "BufReadPost", config = function () ran = ran + 1 end }
 	})
 	laze.build_plan(c1)()
 	local c2 = laze.compile({ { dir = vim.fn.tempname(), name = "stale-none" } })
@@ -481,10 +459,10 @@ end
 do
 	local lhs = vim.api.nvim_replace_termcodes("<leader>sk", true, false, true)
 	local c1 = laze.compile({
-		{ dir = vim.fn.tempname(), name = "stale-key", keys = "<leader>sk" },
+		{ dir = vim.fn.tempname(), name = "stale-key", keys = "<leader>sk" }
 	})
 	laze.build_plan(c1)()
-	vim.keymap.set("n", "<leader>sk2", function() end, { desc = "user map" })
+	vim.keymap.set("n", "<leader>sk2", function () end, { desc = "user map" })
 	local c2 = laze.compile({ { dir = vim.fn.tempname(), name = "stale-none2" } })
 	laze.build_plan(c2)()
 	local trigger_gone, user_kept = true, false
@@ -518,7 +496,7 @@ do
 	fd:close()
 
 	local compiled = laze.compile({
-		{ dir = dir, name = "dir-load-test" },
+		{ dir = dir, name = "dir-load-test" }
 	})
 	if #compiled.pack ~= 0 then
 		print(("  ✗ dir plugin: expected empty pack, got %d entries"):format(#compiled.pack))
@@ -548,13 +526,13 @@ do
 		{
 			"test/dep-parent",
 			event = "BufRead",
-			config = function()
+			config = function ()
 				table.insert(log, "parent")
 			end,
 			dependencies = {
-				{ "test/dep-child", config = function() table.insert(log, "child") end },
-			},
-		},
+				{ "test/dep-child", config = function () table.insert(log, "child") end }
+			}
+		}
 	})
 	local plan = laze.build_plan(compiled)
 	plan()
@@ -583,7 +561,7 @@ do
 	fd:close()
 
 	local compiled = laze.compile({
-		{ dir = dir, name = "after-test", event = "BufRead" },
+		{ dir = dir, name = "after-test", event = "BufRead" }
 	})
 	local plan = laze.build_plan(compiled)
 	plan()
@@ -619,7 +597,7 @@ if is_filtered("perf") or next(filter) == nil then
 				event = (i % 3 == 0) and "VeryLazy" or nil,
 				ft = (i % 4 == 0) and ("ft" .. i) or nil,
 				cmd = (i % 5 == 0) and ("PerfCmd" .. i) or nil,
-				keys = (i % 6 == 0) and ("<leader>p" .. i) or nil,
+				keys = (i % 6 == 0) and ("<leader>p" .. i) or nil
 			})
 		end
 
@@ -646,7 +624,7 @@ if is_filtered("perf") or next(filter) == nil then
 				event = (i % 3 == 0) and "VeryLazy" or nil,
 				ft = (i % 4 == 0) and ("ft" .. i) or nil,
 				cmd = (i % 5 == 0) and ("PerfCmd2" .. i) or nil,
-				keys = (i % 6 == 0) and ("<leader>q" .. i) or nil,
+				keys = (i % 6 == 0) and ("<leader>q" .. i) or nil
 			})
 		end
 		local compiled = laze.compile(specs)
@@ -668,12 +646,12 @@ if is_filtered("perf") or next(filter) == nil then
 		-- from the source), so this measures dispatch + load_plugin overhead.
 		local eager_specs = {}
 		for i = 1, 30 do
-			package.preload["eager-" .. i] = function()
+			package.preload["eager-" .. i] = function ()
 				return true
 			end
 			table.insert(eager_specs, {
 				"test/eager-" .. i,
-				name = "eager-plugin-" .. i,
+				name = "eager-plugin-" .. i
 			})
 		end
 		local eager_compiled = laze.compile(eager_specs)
@@ -701,11 +679,11 @@ if is_filtered("perf") or next(filter) == nil then
 			table.insert(specs, {
 				"test/deep-" .. i,
 				name = "deep-plugin-" .. i,
-				after = after,
+				after = after
 			})
 		end
 
-		local ok, err = pcall(function()
+		local ok, err = pcall(function ()
 			local compiled = laze.compile(specs)
 			local plan_fn = laze.build_plan(compiled)
 			plan_fn() -- eager load all (no triggers, so all load eagerly in dep order)
@@ -739,14 +717,12 @@ if is_filtered("perf") or next(filter) == nil then
 	-- Module trigger lookup uses direct hash access (no iteration)
 	do
 		local compiled = laze.compile({
-			{ "test/mod-plugin", name = "mod-test", module = "my.special.module" },
+			{ "test/mod-plugin", name = "mod-test", module = "my.special.module" }
 		})
 
 		-- Verify routes.modules has O(1) key-based structure (not a list requiring scan)
-		if
-			compiled.routes.modules["my.special.module"]
-			and compiled.routes.modules["my.special.module"][1] == "mod-test"
-		then
+		if compiled.routes.modules["my.special.module"]
+			and compiled.routes.modules["my.special.module"][1] == "mod-test" then
 			print("  ✓ module trigger: O(1) hash lookup in routes.modules")
 			passed = passed + 1
 		else
@@ -840,7 +816,7 @@ if is_filtered("perf") or next(filter) == nil then
 		local compiled = laze.compile({
 			{ "test/alloc-a", name = "alloc-a" },
 			{ "test/alloc-b", name = "alloc-b", after = { "alloc-a" } },
-			{ "test/alloc-c", name = "alloc-c", after = { "alloc-b" } },
+			{ "test/alloc-c", name = "alloc-c", after = { "alloc-b" } }
 		})
 		local plan_fn = laze.build_plan(compiled)
 
@@ -885,11 +861,11 @@ if not fast_only then
 
 	local eager = make_repo("eager", {
 		["plugin/eager.lua"] = "vim.g.laze_eager_plugin = true\n",
-		["after/plugin/eager_after.lua"] = "vim.g.laze_eager_after = true\n",
+		["after/plugin/eager_after.lua"] = "vim.g.laze_eager_after = true\n"
 	})
 	local lazy = make_repo("lazy", {
 		["plugin/lazy.lua"] = "vim.g.laze_lazy_plugin = true\n",
-		["after/plugin/lazy_after.lua"] = "vim.g.laze_lazy_after = true\n",
+		["after/plugin/lazy_after.lua"] = "vim.g.laze_lazy_after = true\n"
 	})
 	local startup_cmd = make_repo("startup-cmd", {
 		["plugin/startup_cmd.lua"] = [[
@@ -897,7 +873,11 @@ vim.api.nvim_create_user_command("LazeStartupCmd", function(opts)
   vim.g.laze_startup_cmd = (vim.g.laze_startup_cmd or 0) + 1
   vim.g.laze_startup_cmd_args = opts.args
 end, { nargs = "*", bang = true, range = true })
-]],
+]]
+	})
+	local modtest = make_repo("modtest", {
+		["lua/modtest.lua"] = "return { value = 42 }\n",
+		["plugin/modtest.lua"] = "vim.g.laze_mod_plugin = (vim.g.laze_mod_plugin or 0) + 1\n"
 	})
 
 	local init_dir = root .. "/config"
@@ -905,16 +885,19 @@ end, { nargs = "*", bang = true, range = true })
 	local init_file = init_dir .. "/init.lua"
 	local fd = io.open(init_file, "w")
 	fd:write(
-		('vim.opt.packpath:prepend(vim.fn.stdpath("data"))\n')
-			.. ('vim.opt.rtp:prepend(%q)\n'):format(repo_path)
-			.. "require(\"laze\").setup({\n"
-			.. ('  { src = %q, name = "eager" },\n'):format(eager)
+		('vim.opt.packpath:prepend(vim.fn.stdpath("data"))\n') .. ('vim.opt.rtp:prepend(%q)\n'):format(repo_path)
+			.. "require(\"laze\").setup({\n" .. ('  { src = %q, name = "eager" },\n'):format(eager)
 			.. ('  { src = %q, name = "lazy", event = "InsertEnter" },\n'):format(lazy)
 			.. ('  { src = %q, name = "startup-cmd", cmd = "LazeStartupCmd" },\n'):format(startup_cmd)
-			.. "})\n"
-			.. "vim.cmd(\"1,1LazeStartupCmd hello\")\n"
-			.. ('vim.api.nvim_create_autocmd("VimEnter", { once = true, callback = function() vim.fn.writefile({ tostring(vim.g.laze_startup_cmd or 0) .. ":" .. (vim.g.laze_startup_cmd_args or "") }, %q); vim.cmd("qa!") end })\n'):format(
-				root .. "/startup-cmd-result"
+			.. ('  { src = %q, name = "modtest", module = "modtest", cmd = "LazeModTest", config = function() vim.g.laze_mod_config = true end },\n'):format(
+				modtest
+			) .. "})\n" .. "vim.cmd(\"1,1LazeStartupCmd hello\")\n" .. "local m = require(\"modtest\")\n"
+			.. "vim.g.laze_mod_require_config = tostring(vim.g.laze_mod_config)\n"
+			.. "vim.g.laze_mod_value = tostring(m and m.value)\n"
+			.. ("vim.api.nvim_create_autocmd(\"VimEnter\", { once = true, callback = function()\n" .. "  vim.fn.writefile({ tostring(vim.g.laze_startup_cmd or 0) .. \":\" .. (vim.g.laze_startup_cmd_args or \"\") }, %q)\n"
+				.. "  vim.fn.writefile({ tostring(vim.g.laze_mod_plugin or 0) .. \":\" .. tostring(vim.g.laze_mod_require_config) .. \":\" .. tostring(vim.g.laze_mod_value) .. \":\" .. tostring(vim.g.laze_mod_config) }, %q)\n"
+				.. "  vim.cmd(\"qa!\")\n" .. "end })\n"):format(
+				root .. "/startup-cmd-result", root .. "/modtest-result"
 			)
 	)
 	fd:close()
@@ -922,16 +905,18 @@ end, { nargs = "*", bang = true, range = true })
 	local env = {
 		XDG_DATA_HOME = root .. "/data",
 		XDG_CONFIG_HOME = root .. "/config",
-		NVIM_LOG_FILE = root .. "/nvim.log",
+		NVIM_LOG_FILE = root .. "/nvim.log"
 	}
 
 	local function run_session(tag)
 		local log = root .. "/startup-" .. tag .. ".log"
 		vim.system({
 			vim.v.progpath,
-			"-u", init_file,
+			"-u",
+			init_file,
 			"--headless",
-			"--startuptime", log,
+			"--startuptime",
+			log
 		}, { env = env }):wait()
 		return vim.fn.readfile(log)
 	end
@@ -951,6 +936,7 @@ end, { nargs = "*", bang = true, range = true })
 		{ "eager/after/plugin/eager_after.lua", 1, "eager after/plugin sourced once (after phase)" },
 		{ "lazy/plugin/lazy.lua", 0, "lazy plugin never sourced" },
 		{ "lazy/after/plugin/lazy_after.lua", 0, "lazy after/plugin never sourced" },
+		{ "modtest/plugin/modtest.lua", 1, "module-triggered plugin sourced once" }
 	}
 
 	local ok = true
@@ -971,6 +957,13 @@ end, { nargs = "*", bang = true, range = true })
 	if startup_cmd_result[1] ~= "1:hello" then
 		ok = false
 		table.insert(details, "startup cmd result=" .. (startup_cmd_result[1] or "<missing>"))
+	end
+	local modtest_result = vim.fn.filereadable(root .. "/modtest-result") == 1
+		and vim.fn.readfile(root .. "/modtest-result")
+		or {}
+	if modtest_result[1] ~= "1:true:42:true" then
+		ok = false
+		table.insert(details, "module require result=" .. (modtest_result[1] or "<missing>"))
 	end
 
 	if ok then
@@ -1011,7 +1004,7 @@ if not fast_only then
 	end
 
 	local dotted = make_repo("laze-build-test.nvim", {
-		["plugin/build_plugin.lua"] = "vim.g.laze_build_plugin = true\n",
+		["plugin/build_plugin.lua"] = "vim.g.laze_build_plugin = true\n"
 	})
 	local cmdrepo = make_repo("buildcmd", { ["plugin/b.lua"] = "" })
 	local fnrepo = make_repo("buildfn", { ["plugin/f.lua"] = "" })
@@ -1021,28 +1014,28 @@ if not fast_only then
 	local init_file = init_dir .. "/init.lua"
 	local fd = io.open(init_file, "w")
 	fd:write(
-		('vim.opt.packpath:prepend(vim.fn.stdpath("data"))\n')
-			.. ('vim.opt.rtp:prepend(%q)\n'):format(repo_path)
-			.. "require(\"laze\").setup({\n"
-			.. ("  { src = %q, build = \"touch build-ran\" },\n"):format(dotted)
-			.. ("  { src = %q, name = \"buildcmd\", build = \":lua vim.fn.writefile({'ran'}, vim.fn.stdpath('data') .. '/cmd-ran')\" },\n"):format(cmdrepo)
-			.. ("  { src = %q, name = \"buildfn\", build = function() vim.fn.writefile({'ran'}, vim.fn.stdpath('data') .. '/fn-ran') end },\n"):format(fnrepo)
-			.. "})\n"
+		('vim.opt.packpath:prepend(vim.fn.stdpath("data"))\n') .. ('vim.opt.rtp:prepend(%q)\n'):format(repo_path)
+			.. "require(\"laze\").setup({\n" .. ("  { src = %q, build = \"touch build-ran\" },\n"):format(dotted)
+			.. ("  { src = %q, name = \"buildcmd\", build = \":lua vim.fn.writefile({'ran'}, vim.fn.stdpath('data') .. '/cmd-ran')\" },\n"):format(
+				cmdrepo
+			)
+			.. ("  { src = %q, name = \"buildfn\", build = function() vim.fn.writefile({'ran'}, vim.fn.stdpath('data') .. '/fn-ran') end },\n"):format(
+				fnrepo
+			) .. "})\n"
 	)
 	fd:close()
 
 	local env = {
 		XDG_DATA_HOME = root .. "/data",
 		XDG_CONFIG_HOME = root .. "/config",
-		NVIM_LOG_FILE = root .. "/nvim.log",
+		NVIM_LOG_FILE = root .. "/nvim.log"
 	}
 	vim.system({ vim.v.progpath, "-u", init_file, "--headless", "+qa" }, { env = env }):wait()
 
-	if
-		#vim.fn.glob(root .. "/data/nvim/site/pack/*/opt/laze-build-test.nvim/build-ran", false, true) == 1
-		and #vim.fn.glob(root .. "/data/nvim/cmd-ran", false, true) == 1
-		and #vim.fn.glob(root .. "/data/nvim/fn-ran", false, true) == 1
-	then
+	if #vim.fn.glob(root .. "/data/nvim/site/pack/*/opt/laze-build-test.nvim/build-ran", false, true) == 1 and #vim.fn.glob(
+			root .. "/data/nvim/cmd-ran", false, true
+		)
+			== 1 and #vim.fn.glob(root .. "/data/nvim/fn-ran", false, true) == 1 then
 		print("  ✓ build: string/:cmd/function forms run after install (pkg-keyed lookup)")
 		passed = passed + 1
 	else
@@ -1085,7 +1078,14 @@ if not fast_only then
 		vim.system({ "git", "init", "-q" }, { cwd = dir }):wait()
 		vim.system({ "git", "add", "-A" }, { cwd = dir }):wait()
 		vim.system({
-			"git", "-c", "user.email=laze@local", "-c", "user.name=laze", "commit", "-qm", "init",
+			"git",
+			"-c",
+			"user.email=laze@local",
+			"-c",
+			"user.name=laze",
+			"commit",
+			"-qm",
+			"init"
 		}, { cwd = dir }):wait()
 		return dir
 	end
@@ -1093,11 +1093,10 @@ if not fast_only then
 	-- Shapes that MUST stay in parity (trailing slash is a documented,
 	-- unit-tested deviation: laze tolerates it lazy-style, vim.pack errors).
 	local rows = {
-		{ repo = "parity-plain",         want = "parity-plain" },
-		{ repo = "parity-dotted.nvim",   want = "parity-dotted.nvim" },
-		{ repo = "parity-dotgit.git",    want = "parity-dotgit" },
+		{ repo = "parity-plain", want = "parity-plain" }, { repo = "parity-dotted.nvim", want = "parity-dotted.nvim" },
+		{ repo = "parity-dotgit.git", want = "parity-dotgit" },
 		{ repo = "nested/parity-nested", want = "parity-nested" },
-		{ repo = "parity-renamed",       name = "custom-named", want = "custom-named" },
+		{ repo = "parity-renamed", name = "custom-named", want = "custom-named" }
 	}
 	for _, row in ipairs(rows) do
 		row.src = make_repo(row.repo, { ["plugin/x.lua"] = "" })
@@ -1133,7 +1132,7 @@ if not fast_only then
 				'for id, e in pairs(compiled.registry) do pkgs[#pkgs + 1] = id .. "\\t" .. tostring(e.pkg) end',
 				"table.sort(pkgs)",
 				('vim.fn.writefile(pkgs, %q)'):format(root .. "/pkg-laze.txt"),
-				"vim.pack.add(compiled.pack)",
+				"vim.pack.add(compiled.pack)"
 			}, "\n")
 		else
 			body = table.concat({
@@ -1141,7 +1140,7 @@ if not fast_only then
 				"local specs = {",
 				spec_lines(),
 				"}",
-				"vim.pack.add(specs)",
+				"vim.pack.add(specs)"
 			}, "\n")
 		end
 		local init_file = config .. "/init.lua"
@@ -1152,8 +1151,8 @@ if not fast_only then
 			env = {
 				XDG_DATA_HOME = data,
 				XDG_CONFIG_HOME = config,
-				NVIM_LOG_FILE = root .. "/nvim-" .. mode .. ".log",
-			},
+				NVIM_LOG_FILE = root .. "/nvim-" .. mode .. ".log"
+			}
 		}):wait()
 		if proc.code ~= 0 then
 			errs[mode] = "exit " .. proc.code .. ": " .. (proc.stderr or "")
@@ -1223,13 +1222,17 @@ if not fast_only then
 			ok = false
 			table.insert(
 				details,
-				("%s: predicted=%s laze-disk=%s vpack-disk=%s"):format(row.want, tostring(predicted), tostring(l_disk), tostring(v_disk))
+				("%s: predicted=%s laze-disk=%s vpack-disk=%s"):format(
+					row.want, tostring(predicted), tostring(l_disk), tostring(v_disk)
+				)
 			)
 		end
 	end
 
 	if ok then
-		print(("  ✓ pkg names: laze derivation matches vim.pack on disk (%d shapes, laze + raw sessions)"):format(#rows))
+		print(
+			("  ✓ pkg names: laze derivation matches vim.pack on disk (%d shapes, laze + raw sessions)"):format(#rows)
+		)
 		passed = passed + 1
 	else
 		local msg = table.concat(details, "; ")
@@ -1254,10 +1257,10 @@ do
 		{
 			dir = vim.fn.tempname(),
 			name = "reload-eager",
-			config = function()
+			config = function ()
 				eager_runs = eager_runs + 1
-			end,
-		},
+			end
+		}
 	}
 	local compiled = laze.setup(specs)
 	if eager_runs == 1 and compiled.registry["reload-eager"] then
@@ -1285,10 +1288,10 @@ do
 			dir = vim.fn.tempname(),
 			name = "reload-lazy",
 			ft = "laze-never-ft",
-			config = function()
+			config = function ()
 				lazy_runs = lazy_runs + 1
-			end,
-		},
+			end
+		}
 	})
 	laze.reload_all()
 	if lazy_runs == 0 then
@@ -1317,33 +1320,33 @@ do
 			"test/cycle-root",
 			name = "cycle-root",
 			after = { "cycle-a", "cycle-sane" },
-			config = function()
+			config = function ()
 				table.insert(order, "root")
-			end,
+			end
 		},
 		{
 			"test/cycle-a",
 			name = "cycle-a",
 			after = { "cycle-b" },
-			config = function()
+			config = function ()
 				table.insert(order, "a")
-			end,
+			end
 		},
 		{
 			"test/cycle-b",
 			name = "cycle-b",
 			after = { "cycle-a" },
-			config = function()
+			config = function ()
 				table.insert(order, "b")
-			end,
+			end
 		},
 		{
 			"test/cycle-sane",
 			name = "cycle-sane",
-			config = function()
+			config = function ()
 				table.insert(order, "sane")
-			end,
-		},
+			end
+		}
 	})
 	local plan_fn = laze.build_plan(compiled)
 	plan_fn()
@@ -1369,10 +1372,38 @@ end
 do
 	local runs = 0
 	local compiled = laze.compile({
-		{ dir = vim.fn.tempname(), name = "cond-fn-false", cond = function() return false end, config = function() runs = runs + 1 end },
-		{ dir = vim.fn.tempname(), name = "enabled-fn-false", enabled = function() return false end, config = function() runs = runs + 1 end },
-		{ dir = vim.fn.tempname(), name = "cond-fn-true", cond = function() return true end, config = function() runs = runs + 1 end },
-		{ dir = vim.fn.tempname(), name = "enabled-fn-true", enabled = function() return true end, config = function() runs = runs + 1 end },
+		{
+			dir = vim.fn.tempname(),
+			name = "cond-fn-false",
+			cond = function () return false end,
+			config = function ()
+				runs = runs + 1
+			end
+		},
+		{
+			dir = vim.fn.tempname(),
+			name = "enabled-fn-false",
+			enabled = function () return false end,
+			config = function ()
+				runs = runs + 1
+			end
+		},
+		{
+			dir = vim.fn.tempname(),
+			name = "cond-fn-true",
+			cond = function () return true end,
+			config = function ()
+				runs = runs + 1
+			end
+		},
+		{
+			dir = vim.fn.tempname(),
+			name = "enabled-fn-true",
+			enabled = function () return true end,
+			config = function ()
+				runs = runs + 1
+			end
+		}
 	})
 	local plan = laze.build_plan(compiled)
 	plan()
@@ -1386,14 +1417,28 @@ do
 	-- throwing hooks warn + skip instead of breaking the plan (never throw)
 	local msgs = {}
 	local orig_notify = vim.notify
-	vim.notify = function(msg, _)
+	vim.notify = function (msg, _)
 		table.insert(msgs, msg)
 	end
 	local compiled2 = laze.compile({
-		{ dir = vim.fn.tempname(), name = "cond-throw", cond = function() error("boom") end, config = function() runs = runs + 1 end },
-		{ dir = vim.fn.tempname(), name = "enabled-throw", enabled = function() error("boom2") end, config = function() runs = runs + 1 end },
+		{
+			dir = vim.fn.tempname(),
+			name = "cond-throw",
+			cond = function () error("boom") end,
+			config = function ()
+				runs = runs + 1
+			end
+		},
+		{
+			dir = vim.fn.tempname(),
+			name = "enabled-throw",
+			enabled = function () error("boom2") end,
+			config = function ()
+				runs = runs + 1
+			end
+		}
 	})
-	local ok = pcall(function()
+	local ok = pcall(function ()
 		laze.build_plan(compiled2)()
 	end)
 	vim.notify = orig_notify
@@ -1410,7 +1455,11 @@ do
 		print("  ✓ cond/enabled: throwing hooks warn + skip (plan never throws)")
 		passed = passed + 1
 	else
-		print(("  ✗ cond/enabled: throwing hooks — ok:%s cond:%s enabled:%s"):format(tostring(ok), tostring(warned_cond), tostring(warned_enabled)))
+		print(
+			("  ✗ cond/enabled: throwing hooks — ok:%s cond:%s enabled:%s"):format(
+				tostring(ok), tostring(warned_cond), tostring(warned_enabled)
+			)
+		)
 		failed = failed + 1
 	end
 end
@@ -1421,22 +1470,22 @@ end
 do
 	local loads, fails, notifs = {}, {}, {}
 	local compiled = laze.compile({
-		{ dir = vim.fn.tempname(), name = "hook-ok", config = function() end },
-		{ dir = vim.fn.tempname(), name = "hook-fail", init = function() error("init boom") end },
+		{ dir = vim.fn.tempname(), name = "hook-ok", config = function () end },
+		{ dir = vim.fn.tempname(), name = "hook-fail", init = function () error("init boom") end },
 		{ dir = vim.fn.tempname(), name = "hook-silent", module = "laze.nope.silent", silent = true },
-		{ dir = vim.fn.tempname(), name = "hook-modfail", module = "laze.nope.loud" },
+		{ dir = vim.fn.tempname(), name = "hook-modfail", module = "laze.nope.loud" }
 	})
 	local orig_notify = vim.notify
-	vim.notify = function(msg, _)
+	vim.notify = function (msg, _)
 		table.insert(notifs, msg)
 	end
 	local plan = laze.build_plan(compiled, {
-		on_load = function(id, ms)
+		on_load = function (id, ms)
 			table.insert(loads, id .. ":" .. type(ms))
 		end,
-		on_fail = function(id, _)
+		on_fail = function (id, _)
 			table.insert(fails, id)
-		end,
+		end
 	})
 	plan()
 	pcall(require, "laze.nope.silent")
@@ -1486,7 +1535,7 @@ end
 -- reload_all with explicit specs replaces the registry (dev-loop override)
 do
 	local replaced = laze.reload_all({
-		{ dir = vim.fn.tempname(), name = "reload-new", config = function() end },
+		{ dir = vim.fn.tempname(), name = "reload-new", config = function () end }
 	})
 	if replaced and replaced.registry["reload-new"] and not replaced.registry["reload-eager"] then
 		print("  ✓ reload_all: explicit specs replace the registry")
@@ -1501,7 +1550,7 @@ end
 do
 	local ran = 0
 	local compiled = laze.compile({
-		{ "test/cmd-fires", name = "cmd-fires", cmd = "LazeUndefTestCmd", config = function() ran = ran + 1 end },
+		{ "test/cmd-fires", name = "cmd-fires", cmd = "LazeUndefTestCmd", config = function () ran = ran + 1 end }
 	})
 	local plan = laze.build_plan(compiled)
 	plan()
@@ -1563,11 +1612,8 @@ do
 		passed = passed + 1
 	else
 		print(
-			"  ✗ dir plugin: basename collision hijacked activation (rtp[1]="
-				.. tostring(rtp_first)
-				.. ", mod="
-				.. tostring(ok_mod)
-				.. ")"
+			"  ✗ dir plugin: basename collision hijacked activation (rtp[1]=" .. tostring(rtp_first) .. ", mod="
+				.. tostring(ok_mod) .. ")"
 		)
 		failed = failed + 1
 	end
@@ -1579,7 +1625,14 @@ end
 do
 	local ran = 0
 	local compiled = laze.compile({
-		{ dir = vim.fn.tempname(), name = "evp", event = { { event = "BufRead", pattern = "*.lua" } }, config = function() ran = ran + 1 end },
+		{
+			dir = vim.fn.tempname(),
+			name = "evp",
+			event = { { event = "BufRead", pattern = "*.lua" } },
+			config = function ()
+				ran = ran + 1
+			end
+		}
 	})
 	local plan = laze.build_plan(compiled)
 	plan()
@@ -1609,14 +1662,14 @@ end
 do
 	local msgs = {}
 	local orig_notify = vim.notify
-	vim.notify = function(msg, _)
+	vim.notify = function (msg, _)
 		table.insert(msgs, msg)
 	end
 	laze.compile({
 		{ "test/u1", lazy = true },
 		{ "test/u2", lazy = true },
 		{ "test/u3", import = "x" },
-		{ "test/u4", main = "m", opts = { foo = 1 } },
+		{ "test/u4", main = "m", opts = { foo = 1 } }
 	})
 	vim.notify = orig_notify
 	if #msgs == 2 then
@@ -1631,15 +1684,15 @@ end
 -- opts+main: generates config = require(main).setup(opts) at load
 do
 	local got = nil
-	package.preload["opts_test_mod"] = function()
+	package.preload["opts_test_mod"] = function ()
 		return {
-			setup = function(o)
+			setup = function (o)
 				got = o
-			end,
+			end
 		}
 	end
 	local compiled = laze.compile({
-		{ dir = vim.fn.tempname(), name = "opts-gen", main = "opts_test_mod", opts = { foo = 1 } },
+		{ dir = vim.fn.tempname(), name = "opts-gen", main = "opts_test_mod", opts = { foo = 1 } }
 	})
 	laze.build_plan(compiled)()
 	package.preload["opts_test_mod"] = nil
@@ -1656,7 +1709,7 @@ end
 -- opts without main is a compile error (laze never guesses module names)
 do
 	local ok = pcall(laze.compile, {
-		{ "test/opts-nomain", opts = { foo = 1 } },
+		{ "test/opts-nomain", opts = { foo = 1 } }
 	})
 	if not ok then
 		print("  ✓ opts: missing main is a compile error")
@@ -1670,7 +1723,7 @@ end
 -- opts must be a table (function form deferred)
 do
 	local ok = pcall(laze.compile, {
-		{ "test/opts-fn", main = "x", opts = function() end },
+		{ "test/opts-fn", main = "x", opts = function () end }
 	})
 	if not ok then
 		print("  ✓ opts: function form is a compile error")
@@ -1684,7 +1737,7 @@ end
 -- config and opts together is a compile error (specify one)
 do
 	local ok = pcall(laze.compile, {
-		{ "test/opts-both", main = "x", opts = { a = 1 }, config = function() end },
+		{ "test/opts-both", main = "x", opts = { a = 1 }, config = function () end }
 	})
 	if not ok then
 		print("  ✓ opts: config+opts together is a compile error")
@@ -1711,14 +1764,14 @@ end
 do
 	local msgs = {}
 	local orig_notify = vim.notify
-	vim.notify = function(msg, _)
+	vim.notify = function (msg, _)
 		table.insert(msgs, msg)
 	end
 	laze.compile({
 		{ "test/ev-a", event = { { event = "BufRead", pattern = "*.lua" } } },
 		{ "test/ev-b", event = { { event = "BufRead", pattern = "*.vim" } } },
 		{ "test/key-a", keys = { { lhs = "<leader>cc", rhs = ":A<CR>" } } },
-		{ "test/key-b", keys = { { lhs = "<leader>cc", rhs = ":B<CR>" } } },
+		{ "test/key-b", keys = { { lhs = "<leader>cc", rhs = ":B<CR>" } } }
 	})
 	vim.notify = orig_notify
 	local ev_warn, key_warn = false, false
@@ -1748,11 +1801,13 @@ do
 		{
 			dir = vim.fn.tempname(),
 			name = "key-rhs",
-			keys = { { lhs = "<leader>kr", rhs = "<cmd>let g:laze_rhs_replayed += 1<CR>", desc = "rhs test", silent = true } },
-			config = function()
+			keys = {
+				{ lhs = "<leader>kr", rhs = "<cmd>let g:laze_rhs_replayed += 1<CR>", desc = "rhs test", silent = true }
+			},
+			config = function ()
 				ran = ran + 1
-			end,
-		},
+			end
+		}
 	})
 	local plan = laze.build_plan(compiled)
 	plan()
@@ -1786,7 +1841,7 @@ end
 do
 	local ran = 0
 	local compiled = laze.compile({
-		{ dir = vim.fn.tempname(), name = "vl-now", event = "VeryLazy", config = function() ran = ran + 1 end },
+		{ dir = vim.fn.tempname(), name = "vl-now", event = "VeryLazy", config = function () ran = ran + 1 end }
 	})
 	local plan = laze.build_plan(compiled)
 	plan()
@@ -1799,7 +1854,6 @@ do
 		failed = failed + 1
 	end
 end
-
 
 -- extras: opt-in modules are never required by the core.
 -- on_load/on_fail wiring is core API and is exercised by the e2e test;
@@ -1864,7 +1918,7 @@ do
 	do
 		local msgs = {}
 		local orig_notify = vim.notify
-		vim.notify = function(msg, _)
+		vim.notify = function (msg, _)
 			table.insert(msgs, msg)
 		end
 		local ok = pcall(vim.cmd, "Laze bogus")
