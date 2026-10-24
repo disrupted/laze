@@ -690,12 +690,16 @@ local function build_plan(compiled, opts)
 					end
 					if rhs == nil then
 						-- Replay the key: the plugin's map (registered during
-						-- load) handles it.
-						vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes(lhs, true, false, true), "", true)
+						-- load) handles it. Insert the replay BEFORE keys already
+						-- queued behind the trigger ('i'): with the default append,
+						-- `gcA` would process `A` first (append at EOL) and then
+						-- insert the replayed `gc` literally instead of firing the
+						-- plugin's longer `gcA` mapping.
+						vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes(lhs, true, false, true), "i", true)
 					elseif type(rhs) == "function" then
 						rhs()
 					else
-						vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes(rhs, true, false, true), "", true)
+						vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes(rhs, true, false, true), "i", true)
 					end
 				end, keymap_opts
 				)

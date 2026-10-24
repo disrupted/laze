@@ -380,6 +380,53 @@ do
 	vim.fn.delete(dir, "rf")
 end
 
+-- keys route: the replay runs before keys already queued behind the trigger
+-- (regression: first use of a longer plugin map like Comment.nvim's `gcA`.
+-- If the replay is appended, the queued `A` runs first and `gc` is inserted
+-- literally instead of the plugin's `gcA` mapping firing.)
+do
+	local dir = vim.fn.tempname() .. "_keyreplay"
+	vim.fn.mkdir(dir .. "/lua", "p")
+	local basename = dir:match("([^/]+)$")
+	local fd = io.open(dir .. "/lua/" .. basename .. ".lua", "w")
+	fd:write("return { loaded = true }\n")
+	fd:close()
+	local lhs = vim.api.nvim_replace_termcodes("<leader>kp", true, false, true)
+	local longer_ran = false
+	local compiled = laze.compile({
+		{
+			dir = dir,
+			name = "key-replay-order",
+			keys = { { lhs = "<leader>kp" } },
+			config = function ()
+				vim.keymap.set("n", "<leader>kpA", function ()
+					longer_ran = true
+				end)
+			end
+		}
+	})
+	local plan = laze.build_plan(compiled)
+	plan()
+	pcall(vim.cmd, "silent! stopinsert")
+	vim.api.nvim_buf_set_lines(0, 0, -1, false, { "keep" })
+	vim.api.nvim_win_set_cursor(0, { 1, 0 })
+	-- `A` is already queued when the trigger callback loads the plugin.
+	vim.api.nvim_feedkeys(lhs .. "A", "x", false)
+	vim.wait(50)
+	local line = vim.api.nvim_get_current_line()
+	if longer_ran and line == "keep" then
+		print("  ✓ keys route: replay precedes queued continuation keys")
+		passed = passed + 1
+	else
+		print(("  ✗ keys route: replay order — longer:%s line:%q"):format(tostring(longer_ran), line))
+		failed = failed + 1
+	end
+	pcall(vim.cmd, "silent! stopinsert")
+	pcall(vim.keymap.del, "n", "<leader>kpA")
+	pcall(vim.keymap.del, "n", lhs)
+	vim.fn.delete(dir, "rf")
+end
+
 -- event route: autocmd is registered
 do
 	local compiled = laze.compile({
