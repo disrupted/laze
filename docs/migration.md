@@ -13,11 +13,12 @@ laze accepts lazy.nvim's declarative spec shape on purpose (escape hatch first).
 **Rejected loudly (safe direction — lazy.nvim never breaks a laze config, only the reverse)**
 
 * Function-shaped triggers (`event`/`cmd`/`ft`/`keys` as a function): compile error — laze does not evaluate triggers.
+* `keys[].ft` (per-key filetype scoping): compile error — install buffer-local maps in `init` or use a top-level `ft` trigger.
 * `build` as a list of commands (lazy.nvim's array form): compile error — use a single string or function. (`build = false` is accepted and means "no build", like lazy.nvim.)
 
 **Silently degraded**
 
-* `keys` entries keep `lhs`/`rhs`/`mode`/`desc`/`silent`; other `vim.keymap.set` options (`noremap`, `nowait`, `expr`, `callback`, `buffer`, …) are dropped. The positional `{ lhs, rhs }` form and function `rhs` are supported.
+* `keys` entries keep `lhs`/`rhs`/`mode`/`desc`/`silent`; other `vim.keymap.set` options (`noremap`, `nowait`, `expr`, `callback`, `buffer`, …) are dropped. The positional `{ lhs, rhs }` form and function `rhs` are supported. Per-key `ft` is rejected rather than dropped (see above).
 * `module = "name"` in laze is an *opt-in* require trigger (registered as a `package.preload` entry); lazy.nvim's `module = false` is an *opt-out* of automatic require-loading. `module = false` in laze means "no module triggers".
 * `opts = {...}` needs an explicit `main = "..."`: laze runs `require(main).setup(opts)` at load and never guesses the module name from the repo (`opts` without `main` is a compile error, as is `config` + `opts` together). `opts` must be a table — the function form is rejected. `config = true` stays an error; write the function or use `opts` + `main`.
 * `version = "*"` and semver strings work (mapped to `vim.pack`'s `version`); `branch`/`tag`/`commit` are folded into the same field. lazy.nvim's `version = false` semantics (run the update resolver differently) do not apply — nil here.
