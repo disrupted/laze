@@ -78,7 +78,7 @@ local function compile_fixture(name)
 	if not ok then
 		return nil, ("could not load fixture — %s"):format(fixture)
 	end
-	local ok3, compiled = pcall(laze.compile, fixture.specs)
+	local ok3, compiled = pcall(laze.compile, fixture.specs, fixture.opts)
 	if not ok3 then
 		return nil, ("compile failed — %s"):format(compiled)
 	end
@@ -89,9 +89,29 @@ end
 print("=== compile tests ===\n")
 
 local compile_fixtures = {
-	"basic", "dev_key", "disabled", "after_deps", "name_override", "dir_source", "dependencies", "silent", "cond",
-	"version_data", "unknown_fields", "module_trigger", "build_dev", "keys_rhs", "version_convert", "deps_dedup",
-	"event_pattern", "keys_opts", "cond_enabled", "name_derivation", "priority_build", "opts_main"
+	"basic",
+	"dev_key",
+	"disabled",
+	"after_deps",
+	"name_override",
+	"dir_source",
+	"dependencies",
+	"silent",
+	"cond",
+	"version_data",
+	"unknown_fields",
+	"module_trigger",
+	"build_dev",
+	"keys_rhs",
+	"version_convert",
+	"deps_dedup",
+	"event_pattern",
+	"keys_opts",
+	"cond_enabled",
+	"name_derivation",
+	"priority_build",
+	"opts_main",
+	"dev_version",
 }
 
 for _, name in ipairs(compile_fixtures) do
@@ -123,6 +143,132 @@ for _, name in ipairs(compile_fixtures) do
 	end
 
 	::continue_compile::
+end
+
+--- Version lowering against the real vim.version.range (the LuaJIT suites
+--- use a stub; this pins the actual Neovim object and the compile error path).
+print("\n=== version lowering (real vim.version.range) ===\n")
+
+do
+	local function compile_one(spec, label)
+		local ok, compiled = pcall(laze.compile, { spec })
+		if not ok then
+			print(("  ✗ %s: %s"):format(label, compiled))
+			failed = failed + 1
+			return nil
+		end
+		return compiled.pack[1]
+	end
+
+	local entry = compile_one({ "user/versioned", name = "versioned", version = ">=1.2.3" }, "version-only range")
+	if entry then
+		local v = entry.version
+		if type(v) == "table" and tostring(v) == ">=1.2.3" and v:has("1.2.3") and not v:has("1.2.2") then
+			print("  ✓ version-only range lowers to a real vim.VersionRange")
+			passed = passed + 1
+		else
+			print(("  ✗ version-only range: got %s (%s)"):format(tostring(v), type(v)))
+			failed = failed + 1
+		end
+	end
+
+	local hyphen = compile_one({ "user/hyphen", name = "hyphen", version = "1.2.3 - 2.0.0" }, "hyphen range")
+	if hyphen then
+		local v = hyphen.version
+		if type(v) == "table" and v:has("1.9.9") and not v:has("2.0.0") then
+			print("  ✓ hyphen range lowers to a real vim.VersionRange")
+			passed = passed + 1
+		else
+			print(("  ✗ hyphen range: got %s (%s)"):format(tostring(v), type(v)))
+			failed = failed + 1
+		end
+	end
+
+	local upper = compile_one({ "user/upper", name = "upper", version = "V1.2.3" }, "uppercase V prefix")
+	if upper then
+		local v = upper.version
+		if type(v) == "table" and v:has("1.2.3") and not v:has("1.2.4") then
+			print("  ✓ uppercase V prefix is accepted")
+			passed = passed + 1
+		else
+			print(("  ✗ uppercase V prefix: got %s (%s)"):format(tostring(v), type(v)))
+			failed = failed + 1
+		end
+	end
+
+	local tag_entry = compile_one(
+		{ "user/tag-wins", name = "tag-wins", tag = "v1", version = "main" },
+		"tag precedence"
+	)
+	if tag_entry then
+		if tag_entry.version == "v1" then
+			print("  ✓ tag wins before an invalid version is parsed")
+			passed = passed + 1
+		else
+			print(("  ✗ tag precedence: got %s"):format(tostring(tag_entry.version)))
+			failed = failed + 1
+		end
+	end
+
+	local ok, err = pcall(laze.compile, { { "user/compound", name = "compound", version = ">=1.2.0 <2.0.0" } })
+	if not ok and tostring(err):find("semver range") then
+		print("  ✓ compound range fails at compile time")
+		passed = passed + 1
+	else
+		print(("  ✗ compound range: expected a compile error, got %s"):format(tostring(err)))
+		failed = failed + 1
+	end
+
+	-- lazy.nvim's own semver_spec cases (Apache-2.0; see the fixture header).
+	-- Check membership, not the internal from/to encoding: vim.version.range
+	-- encodes an exact version as [v, v] while lazy.nvim uses [v, next patch).
+	local lazy_cases = require("tests.fixtures.lazy_semver_cases")
+	for _, case in ipairs(lazy_cases) do
+		local lazy_entry = compile_one(
+			{ "user/lazy-range", name = "lazy-range", version = case.input },
+			("lazy range %q"):format(case.input)
+		)
+		if lazy_entry then
+			local v = lazy_entry.version
+			local good = type(v) == "table"
+			if good then
+				for _, version in ipairs(case.inside) do
+					good = good and v:has(version)
+				end
+				for _, version in ipairs(case.outside) do
+					good = good and not v:has(version)
+				end
+			end
+			if good then
+				print(("  ✓ lazy range %q membership"):format(case.input))
+				passed = passed + 1
+			else
+				print(
+					("  ✗ lazy range %q: got %s (%s)"):format(
+						case.input,
+						tostring(v),
+						type(v)
+					)
+				)
+				failed = failed + 1
+			end
+		end
+	end
+
+	-- Known difference, pinned intentionally: vim.version.range(">1.2.3")
+	-- starts at 1.2.4-0, so it includes 1.2.4-alpha. lazy.nvim starts at
+	-- 1.2.4 and excludes prereleases of the lower bound.
+	local gt = compile_one({ "user/gt", name = "gt", version = ">1.2.3" }, "greater-than prerelease boundary")
+	if gt then
+		local v = gt.version
+		if type(v) == "table" and v:has("1.2.4-alpha") and not v:has("1.2.3") then
+			print("  ✓ known difference: >1.2.3 includes 1.2.4-alpha (vim.version.range)")
+			passed = passed + 1
+		else
+			print(("  ✗ greater-than prerelease boundary: got %s (%s)"):format(tostring(v), type(v)))
+			failed = failed + 1
+		end
+	end
 end
 
 --- Plan tests
@@ -335,6 +481,206 @@ do
 	end
 end
 
+-- keys route: same lhs with different modes are independent triggers —
+-- an n-mode press must not load the v-only plugin, and vice versa
+do
+	local n_loaded, v_loaded = 0, 0
+	local compiled = laze.compile({
+		{
+			dir = vim.fn.tempname(),
+			name = "key-mode-n",
+			keys = { { lhs = "<leader>nm", mode = "n" } },
+			config = function()
+				n_loaded = n_loaded + 1
+			end,
+		},
+		{
+			dir = vim.fn.tempname(),
+			name = "key-mode-v",
+			keys = { { lhs = "<leader>nm", mode = "v" } },
+			config = function()
+				v_loaded = v_loaded + 1
+			end,
+		},
+	})
+	local plan = laze.build_plan(compiled)
+	plan()
+
+	local lhs = vim.api.nvim_replace_termcodes("<leader>nm", true, false, true)
+	local function has_map(mode)
+		for _, km in ipairs(vim.api.nvim_get_keymap(mode)) do
+			if km.lhs == lhs then
+				return true
+			end
+		end
+		return false
+	end
+
+	local found_n, found_v = has_map("n"), has_map("v")
+	vim.api.nvim_feedkeys(lhs, "x", false)
+	vim.wait(50)
+	local n_after_n, v_after_n, v_survived = n_loaded, v_loaded, has_map("v")
+
+	-- Headless `nvim -l` swallows the previous message newline when visual
+	-- mode is entered; emit and flush one explicitly so the runner keeps
+	-- one line per test.
+	io.write("\n")
+	io.flush()
+	vim.cmd("normal! v")
+	vim.api.nvim_feedkeys(lhs, "x", false)
+	vim.wait(50)
+	vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<Esc>", true, false, true), "x", false)
+	local n_after_v, v_after_v = n_loaded, v_loaded
+
+	if found_n and found_v and n_after_n == 1 and v_after_n == 0 and v_survived and n_after_v == 1 and v_after_v == 1 then
+		print("  ✓ keys route: same lhs + different modes fire independently (n press ≠ v plugin)")
+		passed = passed + 1
+	else
+		print(
+			(
+				"  ✗ keys route: mode variants — maps n:%s v:%s after n: n=%d v=%d v_map=%s after v: n=%d v=%d"
+			):format(
+				tostring(found_n),
+				tostring(found_v),
+				n_after_n,
+				v_after_n,
+				tostring(v_survived),
+				n_after_v,
+				v_after_v
+			)
+		)
+		failed = failed + 1
+	end
+	pcall(vim.keymap.del, "n", lhs)
+	pcall(vim.keymap.del, "v", lhs)
+	-- Restore the message newline swallowed while visual mode was active.
+	io.write("\n")
+	io.flush()
+end
+
+-- empty mode string: lazy.nvim passes "" to vim.keymap.set, which creates
+-- a multi-mode mapping (n/v/x/s/o). Keep that behavior.
+do
+	local ran = 0
+	local compiled = laze.compile({
+		{
+			dir = vim.fn.tempname(),
+			name = "key-empty-mode",
+			keys = { { lhs = "<leader>em", mode = "" } },
+			config = function()
+				ran = ran + 1
+			end,
+		},
+	})
+	laze.build_plan(compiled)()
+
+	local lhs = vim.api.nvim_replace_termcodes("<leader>em", true, false, true)
+	local function has_map(mode)
+		for _, km in ipairs(vim.api.nvim_get_keymap(mode)) do
+			if km.lhs == lhs then
+				return true
+			end
+		end
+		return false
+	end
+
+	local found = {}
+	for _, mode in ipairs({ "n", "v", "x", "s", "o" }) do
+		found[mode] = has_map(mode)
+	end
+	local insert_modes_clear = not has_map("i") and not has_map("c") and not has_map("t")
+	vim.api.nvim_feedkeys(lhs, "x", false)
+	vim.wait(50)
+
+	if
+		found.n
+		and found.v
+		and found.x
+		and found.s
+		and found.o
+		and insert_modes_clear
+		and ran == 1
+	then
+		print("  ✓ keys route: empty mode string creates a multi-mode map (lazy.nvim parity)")
+		passed = passed + 1
+	else
+		print(
+			(
+				"  ✗ keys route: empty mode string — n:%s v:%s x:%s s:%s o:%s i/c/t-clear:%s ran:%d"
+			):format(
+				tostring(found.n),
+				tostring(found.v),
+				tostring(found.x),
+				tostring(found.s),
+				tostring(found.o),
+				tostring(insert_modes_clear),
+				ran
+			)
+		)
+		failed = failed + 1
+	end
+	pcall(vim.keymap.del, "", lhs)
+	pcall(vim.keymap.del, "n", lhs)
+	pcall(vim.keymap.del, "v", lhs)
+end
+
+-- empty mode array: lazy.nvim resolves no key handler but keeps the plugin
+-- lazy, so it never loads. No trigger map should be installed.
+do
+	local ran = 0
+	local compiled = laze.compile({
+		{
+			dir = vim.fn.tempname(),
+			name = "key-empty-modes",
+			keys = { { lhs = "<leader>ea", mode = {} } },
+			config = function()
+				ran = ran + 1
+			end,
+		},
+	})
+	laze.build_plan(compiled)()
+
+	local lhs = vim.api.nvim_replace_termcodes("<leader>ea", true, false, true)
+	local function has_map(mode)
+		for _, km in ipairs(vim.api.nvim_get_keymap(mode)) do
+			if km.lhs == lhs then
+				return true
+			end
+		end
+		return false
+	end
+
+	local mapped = false
+	for _, mode in ipairs({ "n", "v", "x", "s", "o", "i", "c", "t" }) do
+		if has_map(mode) then
+			mapped = true
+			break
+		end
+	end
+	vim.api.nvim_feedkeys(lhs, "x", false)
+	vim.wait(50)
+
+	if
+		compiled.registry["key-empty-modes"].has_route
+		and compiled.routes.keys["<leader>ea"] == nil
+		and not mapped
+		and ran == 0
+	then
+		print("  ✓ keys route: empty mode array installs no map and stays lazy (lazy.nvim parity)")
+		passed = passed + 1
+	else
+		print(
+			("  ✗ keys route: empty mode array — has_route:%s route:%s mapped:%s ran:%d"):format(
+				tostring(compiled.registry["key-empty-modes"].has_route),
+				tostring(compiled.routes.keys["<leader>ea"] ~= nil),
+				tostring(mapped),
+				ran
+			)
+		)
+		failed = failed + 1
+	end
+end
+
 -- keys route: plugin's own keymap takes over after the trigger fires
 -- (regression: the trigger map must be deleted BEFORE loading — keymap.del
 -- removes every map for the lhs, which would also kill the plugin's map)
@@ -460,7 +806,7 @@ do
 	local plan = laze.build_plan(compiled)
 	plan()
 
-	local rows = vim.api.nvim_get_autocmds({ group = "laze_events" })
+	local rows = vim.tbl_filter(function (r) return r.event ~= "UIEnter" end, vim.api.nvim_get_autocmds({ group = "laze_events" }))
 	if #rows == 2 and rows[1].id == rows[2].id then
 		print("  ✓ event route: two events share one autocmd call (same id)")
 		passed = passed + 1
@@ -492,7 +838,7 @@ do
 	laze.build_plan(c1)()
 	local c2 = laze.compile({ { dir = vim.fn.tempname(), name = "stale-none" } })
 	laze.build_plan(c2)()
-	local rows = vim.api.nvim_get_autocmds({ group = "laze_events" })
+	local rows = vim.tbl_filter(function (r) return r.event ~= "UIEnter" end, vim.api.nvim_get_autocmds({ group = "laze_events" }))
 	vim.api.nvim_exec_autocmds("BufReadPost", {})
 	if #rows == 0 and ran == 0 then
 		print("  ✓ rebuild: removed event trigger cleared, stale closure silent")
@@ -529,6 +875,37 @@ do
 		failed = failed + 1
 	end
 	vim.keymap.del("n", "<leader>sk2")
+end
+
+do
+	local lhs = vim.api.nvim_replace_termcodes("<leader>sm", true, false, true)
+	local function has_map(mode)
+		for _, km in ipairs(vim.api.nvim_get_keymap(mode)) do
+			if km.lhs == lhs then
+				return true
+			end
+		end
+		return false
+	end
+	local c1 = laze.compile({
+		{
+			dir = vim.fn.tempname(),
+			name = "stale-key-multi",
+			keys = { { lhs = "<leader>sm", mode = { "n", "v" } } },
+		},
+	})
+	laze.build_plan(c1)()
+	local before = has_map("n") and has_map("v")
+	local c2 = laze.compile({ { dir = vim.fn.tempname(), name = "stale-none3" } })
+	laze.build_plan(c2)()
+	local stale = has_map("n") or has_map("v")
+	if before and not stale then
+		print("  ✓ rebuild: removed multi-mode key trigger cleared in every mode")
+		passed = passed + 1
+	else
+		print(("  ✗ rebuild: multi-mode key — before:%s stale:%s"):format(tostring(before), tostring(stale)))
+		failed = failed + 1
+	end
 end
 
 -- dir plugins are excluded from pack and loaded via packadd/rtp by the plan
@@ -900,9 +1277,15 @@ if not fast_only then
 			fd:write(content)
 			fd:close()
 		end
-		vim.system({ "git", "init", "-q" }, { cwd = dir }):wait()
-		vim.system({ "git", "add", "-A" }, { cwd = dir }):wait()
-		vim.system({ "git", "commit", "-qm", "init" }, { cwd = dir }):wait()
+		vim.system({ "git", "init", "-q" }, { cwd = dir, timeout = 10000 }):wait()
+		vim.system({ "git", "add", "-A" }, { cwd = dir, timeout = 10000 }):wait()
+		-- Explicit identity: CI runners have no global git user, and a
+		-- failed commit leaves an empty local clone that vim.pack cannot
+		-- install (the spawned session then never reaches VimEnter).
+		vim.system(
+			{ "git", "-c", "user.name=laze", "-c", "user.email=laze@local", "commit", "-qm", "init" },
+			{ cwd = dir, timeout = 10000 }
+		):wait()
 		return dir
 	end
 
@@ -962,9 +1345,8 @@ end, { nargs = "*", bang = true, range = true })
 			"-u",
 			init_file,
 			"--headless",
-			"--startuptime",
-			log
-		}, { env = env }):wait()
+			"--startuptime", log,
+		}, { env = env, timeout = 30000 }):wait()
 		return vim.fn.readfile(log)
 	end
 
@@ -1044,9 +1426,12 @@ if not fast_only then
 			fd:write(content)
 			fd:close()
 		end
-		vim.system({ "git", "init", "-q" }, { cwd = dir }):wait()
-		vim.system({ "git", "add", "-A" }, { cwd = dir }):wait()
-		vim.system({ "git", "commit", "-qm", "init" }, { cwd = dir }):wait()
+		vim.system({ "git", "init", "-q" }, { cwd = dir, timeout = 10000 }):wait()
+		vim.system({ "git", "add", "-A" }, { cwd = dir, timeout = 10000 }):wait()
+		vim.system(
+			{ "git", "-c", "user.name=laze", "-c", "user.email=laze@local", "commit", "-qm", "init" },
+			{ cwd = dir, timeout = 10000 }
+		):wait()
 		return dir
 	end
 
@@ -1077,7 +1462,7 @@ if not fast_only then
 		XDG_CONFIG_HOME = root .. "/config",
 		NVIM_LOG_FILE = root .. "/nvim.log"
 	}
-	vim.system({ vim.v.progpath, "-u", init_file, "--headless", "+qa" }, { env = env }):wait()
+	vim.system({ vim.v.progpath, "-u", init_file, "--headless", "+qa" }, { env = env, timeout = 30000 }):wait()
 
 	if #vim.fn.glob(root .. "/data/nvim/site/pack/*/opt/laze-build-test.nvim/build-ran", false, true) == 1 and #vim.fn.glob(
 			root .. "/data/nvim/cmd-ran", false, true
@@ -1122,18 +1507,11 @@ if not fast_only then
 			fd:write(content)
 			fd:close()
 		end
-		vim.system({ "git", "init", "-q" }, { cwd = dir }):wait()
-		vim.system({ "git", "add", "-A" }, { cwd = dir }):wait()
+		vim.system({ "git", "init", "-q" }, { cwd = dir, timeout = 10000 }):wait()
+		vim.system({ "git", "add", "-A" }, { cwd = dir, timeout = 10000 }):wait()
 		vim.system({
-			"git",
-			"-c",
-			"user.email=laze@local",
-			"-c",
-			"user.name=laze",
-			"commit",
-			"-qm",
-			"init"
-		}, { cwd = dir }):wait()
+			"git", "-c", "user.email=laze@local", "-c", "user.name=laze", "commit", "-qm", "init",
+		}, { cwd = dir, timeout = 10000 }):wait()
 		return dir
 	end
 
@@ -1198,8 +1576,9 @@ if not fast_only then
 			env = {
 				XDG_DATA_HOME = data,
 				XDG_CONFIG_HOME = config,
-				NVIM_LOG_FILE = root .. "/nvim-" .. mode .. ".log"
-			}
+				NVIM_LOG_FILE = root .. "/nvim-" .. mode .. ".log",
+			},
+			timeout = 30000,
 		}):wait()
 		if proc.code ~= 0 then
 			errs[mode] = "exit " .. proc.code .. ": " .. (proc.stderr or "")
@@ -1512,7 +1891,8 @@ do
 end
 
 -- on_load / on_fail hooks: called with numeric duration for loaded plugins,
--- on_fail for init failures and module-require failures; silent suppresses
+-- on_fail for module-require failures (init runs once at startup and only
+-- notifies; it no longer blocks the load); silent suppresses
 -- the failure notification for its own plugin.
 do
 	local loads, fails, notifs = {}, {}, {}
@@ -1538,17 +1918,18 @@ do
 	pcall(require, "laze.nope.silent")
 	pcall(require, "laze.nope.loud")
 	vim.notify = orig_notify
-	if #loads == 1 and loads[1] == "hook-ok:number" then
-		print("  ✓ on_load: called once with numeric duration for the loaded plugin")
+	table.sort(loads)
+	if #loads == 2 and loads[1] == "hook-fail:number" and loads[2] == "hook-ok:number" then
+		print("  ✓ on_load: called once per loaded plugin with numeric duration")
 		passed = passed + 1
 	else
 		print("  ✗ on_load: got " .. #loads .. " entries")
 		failed = failed + 1
 	end
-	local fail_ok = #fails == 3
-	local ordered = fails[1] == "hook-fail" and fails[2] == "hook-silent" and fails[3] == "hook-modfail"
+	local fail_ok = #fails == 2
+	local ordered = fails[1] == "hook-silent" and fails[2] == "hook-modfail"
 	if fail_ok and ordered then
-		print("  ✓ on_fail: init failure + both module-require failures reported")
+		print("  ✓ on_fail: both module-require failures reported")
 		passed = passed + 1
 	else
 		print("  ✗ on_fail: got " .. #fails .. " entries")
@@ -1705,6 +2086,102 @@ do
 	end
 end
 
+-- same event, different patterns: each (event, pattern) variant is wired
+-- independently. A patternless spec must load for any buffer and a patterned
+-- spec only for matching buffers — in both spec orders (a name-keyed route
+-- let whichever spec came first dictate the pattern shared by both).
+local function check_event_variant_order(patterned_first)
+	local plain_ran, lua_ran = 0, 0
+	local suffix = patterned_first and "patterned-first" or "patternless-first"
+	local plain = {
+		dir = vim.fn.tempname(),
+		name = "ev-order-plain-" .. suffix,
+		event = "BufRead",
+		config = function() plain_ran = plain_ran + 1 end,
+	}
+	local patterned = {
+		dir = vim.fn.tempname(),
+		name = "ev-order-lua-" .. suffix,
+		event = { { event = "BufRead", pattern = "*.lua" } },
+		config = function() lua_ran = lua_ran + 1 end,
+	}
+	local specs = patterned_first and { patterned, plain } or { plain, patterned }
+	laze.build_plan(laze.compile(specs))()
+
+	local rows = vim.api.nvim_get_autocmds({ event = "BufReadPost", group = "laze_events" })
+	local lua_rows = 0
+	for _, row in ipairs(rows) do
+		if row.pattern == "*.lua" then
+			lua_rows = lua_rows + 1
+		end
+	end
+	if #rows == 2 and lua_rows == 1 then
+		print(("  ✓ event variants (%s): one autocmd per pattern variant"):format(suffix))
+		passed = passed + 1
+	else
+		print(("  ✗ event variants (%s): rows=%d lua-patterned=%d"):format(suffix, #rows, lua_rows))
+		failed = failed + 1
+	end
+
+	local b_vim = vim.api.nvim_create_buf(false, true)
+	vim.api.nvim_buf_set_name(b_vim, vim.fn.tempname() .. ".vim")
+	vim.api.nvim_exec_autocmds("BufRead", { buffer = b_vim })
+	if plain_ran == 1 and lua_ran == 0 then
+		print(("  ✓ event variants (%s): non-matching buffer loads only the patternless plugin"):format(suffix))
+		passed = passed + 1
+	else
+		print(("  ✗ event variants (%s): non-matching buffer — plain:%d lua:%d"):format(suffix, plain_ran, lua_ran))
+		failed = failed + 1
+	end
+
+	local b_lua = vim.api.nvim_create_buf(false, true)
+	vim.api.nvim_buf_set_name(b_lua, vim.fn.tempname() .. ".lua")
+	vim.api.nvim_exec_autocmds("BufRead", { buffer = b_lua })
+	if plain_ran == 1 and lua_ran == 1 then
+		print(("  ✓ event variants (%s): matching buffer loads the patterned plugin"):format(suffix))
+		passed = passed + 1
+	else
+		print(("  ✗ event variants (%s): matching buffer — plain:%d lua:%d"):format(suffix, plain_ran, lua_ran))
+		failed = failed + 1
+	end
+end
+
+check_event_variant_order(false)
+check_event_variant_order(true)
+
+-- VeryLazy keeps its special handling alongside (event, pattern) variants
+do
+	local vl_ran, ev_ran = 0, 0
+	local compiled = laze.compile({
+		{ dir = vim.fn.tempname(), name = "ev-vl", event = "VeryLazy", config = function() vl_ran = vl_ran + 1 end },
+		{
+			dir = vim.fn.tempname(),
+			name = "ev-vl-lua",
+			event = { { event = "BufRead", pattern = "*.lua" } },
+			config = function() ev_ran = ev_ran + 1 end,
+		},
+	})
+	laze.build_plan(compiled)()
+	vim.wait(10)
+	if vl_ran == 1 and ev_ran == 0 then
+		print("  ✓ event variants: VeryLazy still fires immediately (headless) while patterned events stay lazy")
+		passed = passed + 1
+	else
+		print(("  ✗ event variants: VeryLazy interaction — vl:%d ev:%d"):format(vl_ran, ev_ran))
+		failed = failed + 1
+	end
+	local b_lua = vim.api.nvim_create_buf(false, true)
+	vim.api.nvim_buf_set_name(b_lua, vim.fn.tempname() .. ".lua")
+	vim.api.nvim_exec_autocmds("BufRead", { buffer = b_lua })
+	if ev_ran == 1 then
+		print("  ✓ event variants: patterned event still loads after VeryLazy fired")
+		passed = passed + 1
+	else
+		print(("  ✗ event variants: patterned event after VeryLazy — ev:%d"):format(ev_ran))
+		failed = failed + 1
+	end
+end
+
 -- unsupported-field warnings are deduped per field per compile
 do
 	local msgs = {}
@@ -1713,8 +2190,8 @@ do
 		table.insert(msgs, msg)
 	end
 	laze.compile({
-		{ "test/u1", lazy = true },
-		{ "test/u2", lazy = true },
+		{ "test/u1", optional = true },
+		{ "test/u2", optional = true },
 		{ "test/u3", import = "x" },
 		{ "test/u4", main = "m", opts = { foo = 1 } }
 	})
@@ -1807,14 +2284,15 @@ do
 	end
 end
 
--- conflicting trigger merges warn instead of silently dropping (first wins)
+-- distinct event patterns route independently (no conflict warning);
+-- conflicting shared-lhs merges still warn instead of silently dropping
 do
 	local msgs = {}
 	local orig_notify = vim.notify
 	vim.notify = function (msg, _)
 		table.insert(msgs, msg)
 	end
-	laze.compile({
+	local compiled = laze.compile({
 		{ "test/ev-a", event = { { event = "BufRead", pattern = "*.lua" } } },
 		{ "test/ev-b", event = { { event = "BufRead", pattern = "*.vim" } } },
 		{ "test/key-a", keys = { { lhs = "<leader>cc", rhs = ":A<CR>" } } },
@@ -1830,11 +2308,25 @@ do
 			key_warn = true
 		end
 	end
-	if ev_warn and key_warn then
-		print("  ✓ trigger conflicts: event-pattern and shared-lhs merges warn")
+	local key_variants = compiled.routes.keys["<leader>cc"]
+	local first_kept = key_variants ~= nil
+		and #key_variants == 1
+		and key_variants[1].mode == "n"
+		and key_variants[1].rhs == ":A<CR>"
+		and #key_variants[1].ids == 2
+	local event_variants = compiled.routes.events.BufReadPost or {}
+	if not ev_warn and key_warn and first_kept and #event_variants == 2 then
+		print("  ✓ trigger conflicts: event patterns route independently; shared-lhs merges warn; first key rhs/opts kept")
 		passed = passed + 1
 	else
-		print(("  ✗ trigger conflicts: event:%s keys:%s"):format(tostring(ev_warn), tostring(key_warn)))
+		print(
+			("  ✗ trigger conflicts: event-warn:%s keys:%s first_kept:%s event-variants:%d"):format(
+				tostring(ev_warn),
+				tostring(key_warn),
+				tostring(first_kept),
+				#event_variants
+			)
+		)
 		failed = failed + 1
 	end
 end

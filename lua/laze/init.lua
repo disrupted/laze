@@ -22,7 +22,7 @@
 ---@field keys? string|(string|LazeKeySpec|LazeNamedKeySpec)[]
 ---@field dev? boolean|string
 ---@field dev_path? string
----@field version? string|vim.VersionRange|false
+---@field version? string|false Semver range; git refs use branch/tag/commit
 ---@field data? any
 ---@field branch? string
 ---@field tag? string
@@ -66,11 +66,18 @@
 ---@field is_dep boolean Plugin is referenced as an `after` dependency (never eager)
 ---@field pkg? string Directory name under pack/<pkg>/opt/ (matches vim.pack; may differ from id for dotted repos)
 
+---@class LazeKeyRoute One trigger map for a single (lhs, mode) variant
+---@field mode string Normalized single mode (mode arrays are expanded at compile time)
+---@field ids string[]
+---@field rhs? string|fun()
+---@field desc? string
+---@field silent? boolean
+
 ---@class LazeRoutes
----@field events table<string, {ids: string[], pattern?: string}>
+---@field events table<string, {ids: string[], pattern?: string}[]> One pattern variant per distinct (event, pattern) pair
 ---@field fts table<string, string[]>
 ---@field cmds table<string, string[]>
----@field keys table<string, {mode: string|string[], ids: string[], rhs?: string|fun(), desc?: string, silent?: boolean}>
+---@field keys table<string, LazeKeyRoute[]> Keyed by lhs; one entry per mode variant
 ---@field modules table<string, string[]>
 
 ---@alias LazePlan fun(): nil

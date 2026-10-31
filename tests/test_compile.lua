@@ -12,8 +12,8 @@ vim.fn = {
 		return s:gsub("^~", os.getenv("HOME") or "")
 	end,
 }
-vim.version = { range = function()
-	return "RANGE"
+vim.version = { range = function(v)
+	return "RANGE:" .. v
 end }
 vim.inspect = function(v)
 	if type(v) == "string" then
@@ -93,7 +93,7 @@ local function compile_fixture(name)
 	if not ok then
 		return nil, ("could not load fixture \226\128\148 %s"):format(fixture)
 	end
-	local ok3, compiled = pcall(compile, fixture.specs)
+	local ok3, compiled = pcall(compile, fixture.specs, fixture.opts)
 	if not ok3 then
 		return nil, ("compile failed \226\128\148 %s"):format(compiled)
 	end
@@ -121,7 +121,9 @@ local compile_fixtures = {
 	"deps_dedup",
 	"event_pattern",
 	"keys_opts",
+	"keys_variants",
 	"cond_enabled",
+	"dev_version",
 }
 
 for _, name in ipairs(compile_fixtures) do
@@ -365,6 +367,16 @@ local events_cases = {
 		{ { event = "BufEnter", pattern = "*.md" } },
 		"single event with pattern",
 	},
+	{
+		{ event = "BufWritePost", pattern = "*.lua" },
+		{ { event = "BufWritePost", pattern = "*.lua" } },
+		"single { event, pattern } table (lazy.nvim LazyEventSpec)",
+	},
+	{
+		{ event = { "BufRead", "BufWrite" }, pattern = "*.md" },
+		{ { event = "BufReadPost", pattern = "*.md" }, { event = "BufWritePre", pattern = "*.md" } },
+		"single table with event array + pattern, aliases normalized",
+	},
 	{ "BufRead", { { event = "BufReadPost" } }, "alias normalized to stored form" },
 	{ "BufWrite", { { event = "BufWritePre" } }, "alias normalized to stored form" },
 	{ "BufCreate", { { event = "BufAdd" } }, "alias normalized to stored form" },
@@ -374,20 +386,241 @@ for _, case in ipairs(events_cases) do
 	check(normalize_events(case[1]), case[2], case[3])
 end
 
+print("\n=== event route variants tests ===\n")
+
+-- Each distinct (event, pattern) pair is an independent route variant:
+-- a patternless spec must never inherit another spec's pattern, and a
+-- patterned spec must not fire unconditionally. Spec order only changes
+-- variant order, never the grouping.
+local function event_routes(specs)
+	return compile(specs).routes.events
+end
+
+check(event_routes({
+	{ "test/plain", event = "BufReadPre" },
+	{ "test/lua", event = { { event = "BufReadPre", pattern = "*.lua" } } },
+}), {
+	BufReadPre = {
+		{ ids = { "plain" } },
+		{ pattern = "*.lua", ids = { "lua" } },
+	},
+}, "same event, patternless first: separate variants")
+
+check(event_routes({
+	{ "test/lua", event = { { event = "BufReadPre", pattern = "*.lua" } } },
+	{ "test/plain", event = "BufReadPre" },
+}), {
+	BufReadPre = {
+		{ pattern = "*.lua", ids = { "lua" } },
+		{ ids = { "plain" } },
+	},
+}, "same event, patterned first: separate variants")
+
+check(event_routes({
+	{ "test/a", event = { { event = "BufReadPre", pattern = "*.lua" } } },
+	{ "test/b", event = { { event = "BufReadPre", pattern = "*.lua" } } },
+}), {
+	BufReadPre = {
+		{ pattern = "*.lua", ids = { "a", "b" } },
+	},
+}, "same event + same pattern: deduped into one variant")
+
+check(event_routes({
+	{ "test/a", event = "BufReadPre" },
+	{ "test/b", event = "BufReadPre" },
+}), {
+	BufReadPre = {
+		{ ids = { "a", "b" } },
+	},
+}, "same event + no pattern: deduped into one variant")
+
+check(event_routes({
+	{ "test/map", event = { event = "BufReadPre", pattern = "*.lua" } },
+}), {
+	BufReadPre = {
+		{ pattern = "*.lua", ids = { "map" } },
+	},
+}, "single { event, pattern } table compiles to a route variant")
+
+local map_compiled = compile({
+	{ "test/map-lazy", event = { event = "BufWritePost", pattern = "*.lua" } },
+})
+expect(map_compiled.registry["map-lazy"].has_route, "single { event, pattern } table marks the plugin lazy")
+
+local ok_bad_pattern = pcall(compile, {
+	{ "test/bad-pattern", event = { event = "BufReadPre", pattern = 42 } },
+})
+expect(not ok_bad_pattern, "single { event, pattern } table rejects a non-string pattern")
+
+local ok_bad_event = pcall(compile, {
+	{ "test/bad-event", event = { event = "", pattern = "*.lua" } },
+})
+expect(not ok_bad_event, "single { event, pattern } table rejects an empty event")
+
 print("\n=== resolve_version tests ===\n")
 
 local version_cases = {
 	{ { version = false }, nil, "false → default branch (nil)" },
-	{ { version = "*" }, "RANGE", "'*' → vim.version.range (latest tag)" },
-	{ { version = "2.1.0" }, "2.1.0", "explicit version string" },
-	{ { commit = "abc123", tag = "v1", branch = "main" }, "abc123", "commit > tag > branch" },
-	{ { tag = "v1", branch = "main" }, "v1", "tag > branch" },
+	{ { version = "*" }, "RANGE:*", "'*' → vim.version.range (latest tag)" },
+	{ { version = "" }, "RANGE:", "empty string → all versions (lazy.nvim/vim.version.range)" },
+	{ { version = "2.1.0" }, "RANGE:2.1.0", "explicit version string is a semver range" },
+	{ { version = "v1.2.3" }, "RANGE:v1.2.3", "v-prefixed version stays a semver range" },
+	{ { version = "V1.2.3" }, "RANGE:V1.2.3", "uppercase V-prefixed version stays a semver range" },
+	{ { version = "1" }, "RANGE:1", "partial major version stays a semver range" },
+	{ { version = "1.2" }, "RANGE:1.2", "partial minor version stays a semver range" },
+	{ { version = "1.x" }, "RANGE:1.x", "wildcard minor version stays a semver range" },
+	{ { version = "1.2.x" }, "RANGE:1.2.x", "wildcard patch version stays a semver range" },
+	{ { version = "^1.2.3" }, "RANGE:^1.2.3", "caret range stays a semver range" },
+	{ { version = "~1.2.3" }, "RANGE:~1.2.3", "tilde range stays a semver range" },
+	{ { version = ">1.2.3" }, "RANGE:>1.2.3", "greater-than range stays a semver range" },
+	{ { version = ">=2.0.0" }, "RANGE:>=2.0.0", "range operator stays a semver range" },
+	{ { version = "<1.2.3" }, "RANGE:<1.2.3", "less-than range stays a semver range" },
+	{ { version = "<=1.2.3" }, "RANGE:<=1.2.3", "less-than-or-equal range stays a semver range" },
+	{ { version = "=1.2.3" }, "RANGE:=1.2.3", "explicit equality range stays a semver range" },
+	{ { version = "1.2.3-rc.1" }, "RANGE:1.2.3-rc.1", "prerelease version stays a semver range" },
+	{ { version = "1.2.3+build.2" }, "RANGE:1.2.3+build.2", "build metadata stays a semver range" },
+	{
+		{ version = "1.2.3-rc.1+build.2" },
+		"RANGE:1.2.3-rc.1+build.2",
+		"prerelease + build metadata stays a semver range",
+	},
+	{ { version = "1.2.3 - 2.3.4" }, "RANGE:1.2.3 - 2.3.4", "hyphen range stays a semver range" },
+	{
+		{ commit = "abc123", tag = "v1", version = "1.0.0", branch = "main" },
+		"abc123",
+		"commit > tag > version > branch",
+	},
+	{ { tag = "v1", version = "1.0.0", branch = "main" }, "v1", "tag > version > branch" },
+	{ { version = "1.0.0", branch = "main" }, "RANGE:1.0.0", "version > branch" },
+	{ { version = false, branch = "main" }, "main", "false skips version, uses branch" },
+	{ { version = false, tag = "v1" }, "v1", "false skips version, uses tag" },
+	{ { version = false, commit = "abc123" }, "abc123", "false skips version, uses commit" },
+	{ { tag = "v1", version = "main" }, "v1", "tag wins before version is parsed" },
+	{ { commit = "abc123", version = "main" }, "abc123", "commit wins before version is parsed" },
 	{ { branch = "main" }, "main", "branch alone" },
 	{ {}, nil, "nothing → default branch" },
 }
 
 for _, case in ipairs(version_cases) do
 	check(resolve_version(case[1]), case[2], case[3])
+end
+
+-- These must fail before reaching vim.version.range; otherwise vim.version.range
+-- would silently narrow or misparse them.
+local invalid_versions = {
+	"main",
+	"abc123",
+	"1.2 || 1.3",
+	">=1.2.0 <2.0.0",
+	">=1.2.0<2.0.0",
+	">=1.2.0\t<2.0.0",
+	">= 1.0.0",
+	"1.2.3 - ",
+	"1.2.3 - 2.3.4 - 3.4.5",
+	"1.2.3 garbage",
+	"1.2.3;2.0.0",
+	"1.2.3 && 2.0.0",
+	">>1.2",
+	"==1.2",
+	"~>1.2",
+	"1.2.3.4",
+	"1.2.3garbage",
+	"1.x.3",
+	"1.2.3-",
+	"1.2.3+",
+	"1.2.3-rc..1",
+	" ",
+	"1.2.3 ",
+}
+for _, v in ipairs(invalid_versions) do
+	local ok, err = pcall(resolve_version, { version = v })
+	expect(not ok and tostring(err):find("semver range") ~= nil, ("invalid version %q is rejected"):format(v))
+end
+
+do
+	local old_range = vim.version.range
+	local sentinel = {}
+	local calls = 0
+	vim.version.range = function()
+		calls = calls + 1
+		return sentinel
+	end
+	local ok, c = pcall(compile, { { "folke/versioned.nvim", name = "versioned", version = ">=1.0.0" } })
+	vim.version.range = old_range
+	expect(ok, "compile accepts a version-only range")
+	if ok then
+		expect(c.pack[1].version == sentinel, "compile lowers version to the vim.version.range object")
+		expect(calls == 1, "compile parses each version range once")
+	end
+end
+
+do
+	local c = compile({ { "folke/false-branch.nvim", name = "false-branch", version = false, branch = "develop" } })
+	expect(c.pack[1].version == "develop", "compile keeps branch when version=false")
+end
+
+do
+	local c = compile({ { "folke/tag-wins.nvim", name = "tag-wins", tag = "v1", version = "main" } })
+	expect(c.pack[1].version == "v1", "compile does not parse a version overridden by tag")
+end
+
+do
+	local ok, err = pcall(compile, { { dir = "/tmp/laze-dir", name = "local", version = "main" } })
+	expect(not ok and tostring(err):find("semver range") ~= nil, "dir plugin with invalid version is rejected")
+	local ok2, c = pcall(compile, { { dir = "/tmp/laze-dir", name = "local", version = ">=1.0.0" } })
+	expect(ok2 and #c.pack == 0, "dir plugin with valid version compiles with no pack entry")
+end
+
+do
+	-- An active dev path is a local checkout: lazy.nvim turns `dev` into a
+	-- local `dir`, so version/branch/tag/commit are never applied to it.
+	-- Lowering them would make vim.pack clone the dev path and check out the
+	-- ref there instead of loading the working tree (issue #1).
+	local function dev_pack(spec, dev_root)
+		local ok, c = pcall(compile, { spec }, { dev_root = dev_root or "/home/user/dev" })
+		expect(ok, "dev spec compiles: " .. (spec.name or "?"))
+		return ok and c.pack[1] or nil
+	end
+
+	local bool_dev = dev_pack({ "user/dev-bool.nvim", name = "dev-bool", dev = true, version = ">=1.0.0" })
+	expect(bool_dev and bool_dev.src == "/home/user/dev/dev-bool", "dev=true + version: src is the dev path")
+	expect(bool_dev and bool_dev.version == nil, "dev=true + version: no version on the pack entry")
+
+	local path_dev = dev_pack({ "user/dev-path.nvim", name = "dev-path", dev = "/abs/dev-path", version = "^2.0.0" })
+	expect(path_dev and path_dev.src == "/abs/dev-path", "dev=string + version: src is the dev path")
+	expect(path_dev and path_dev.version == nil, "dev=string + version: no version on the pack entry")
+
+	local fallback_dev = dev_pack({ "user/dev-fb.nvim", name = "dev-fb", dev_path = "/abs/dev-fb", version = "1.2.3" })
+	expect(fallback_dev and fallback_dev.src == "/abs/dev-fb", "dev_path + version: src is the dev path")
+	expect(fallback_dev and fallback_dev.version == nil, "dev_path + version: no version on the pack entry")
+
+	-- Refs are version checkouts too: a dev source drops them for the same
+	-- reason (lazy.nvim never checks out a local dir).
+	for _, case in ipairs({
+		{ field = "tag", value = "v1.0.0" },
+		{ field = "commit", value = "abc123" },
+		{ field = "branch", value = "develop" },
+	}) do
+		local spec = { "user/dev-ref.nvim", name = "dev-ref", dev = true }
+		spec[case.field] = case.value
+		local entry = dev_pack(spec)
+		expect(entry and entry.version == nil, "dev=true + " .. case.field .. ": no version checkout")
+	end
+
+	local false_dev = dev_pack({ "user/dev-false.nvim", name = "dev-false", dev = true, version = false })
+	expect(false_dev and false_dev.version == nil, "dev=true + version=false: no version")
+
+	-- Validation is unchanged (same policy as `dir`): an unrepresentable
+	-- range still fails loudly even though it is never lowered.
+	local ok, err = pcall(compile, { { "user/dev-bad.nvim", name = "dev-bad", dev = true, version = "main" } })
+	expect(not ok and tostring(err):find("semver range") ~= nil, "dev spec with invalid version is rejected")
+
+	-- Remote specs are untouched: version still lowers, refs keep precedence.
+	local ok2, remote = pcall(compile, { { "user/remote.nvim", name = "remote", version = ">=1.0.0" } })
+	expect(ok2 and remote.pack[1].version == "RANGE:>=1.0.0", "remote spec still lowers version")
+	local ok3, remote_tag =
+		pcall(compile, { { "user/remote-tag.nvim", name = "remote-tag", tag = "v1", version = ">=1.0.0" } })
+	expect(ok3 and remote_tag.pack[1].version == "v1", "remote spec: tag still wins over version")
 end
 
 print("\n=== compile detail tests ===\n")
@@ -488,6 +721,12 @@ local rejection_cases = {
 	{ { "folke/x.nvim", name = "x", module = {} }, "module must not be an empty array", "empty module array rejected" },
 	{ { "folke/x.nvim", name = "x", version = 42 }, "version must be a string", "numeric version rejected" },
 	{ { "folke/x.nvim", name = "x", version = {} }, "version must be a string", "table version rejected" },
+	{ { "folke/x.nvim", name = "x", version = "main" }, "not a supported semver range", "git ref in version rejected" },
+	{ { "folke/x.nvim", name = "x", version = "abc123" }, "not a supported semver range", "commit hash in version rejected" },
+	{ { "folke/x.nvim", name = "x", version = "1.2 || 1.3" }, "not a supported semver range", "multi-range version rejected" },
+	{ { "folke/x.nvim", name = "x", branch = 42 }, "branch must be a non-empty string", "numeric branch rejected" },
+	{ { "folke/x.nvim", name = "x", tag = "" }, "tag must be a non-empty string", "empty tag rejected" },
+	{ { "folke/x.nvim", name = "x", commit = {} }, "commit must be a non-empty string", "table commit rejected" },
 	{ { "folke/x.nvim", name = "x", priority = "high" }, "priority must be a number", "string priority rejected" },
 	{ { "folke/x.nvim", name = "x", ft = "" }, "must not be empty", "empty ft rejected" },
 	{ { "folke/x.nvim", name = "x", cmd = { "" } }, "must not be empty", "empty cmd element rejected" },
@@ -513,12 +752,196 @@ end
 do
 	local c = compile({ { "folke/x.nvim", name = "x", keys = { { "<leader>x", "<cmd>X<CR>" } } } })
 	expect(c.registry["x"].has_route == true, "tuple keys entry still accepted")
-	expect(c.routes.keys["<leader>x"].rhs == "<cmd>X<CR>", "tuple keys rhs routed")
+	expect(c.routes.keys["<leader>x"][1].rhs == "<cmd>X<CR>", "tuple keys rhs routed")
 end
 
 do
 	local c = compile({ { "folke/x.nvim", name = "x", keys = { { lhs = "<leader>m", mode = { "n", "v" } } } } })
-	expect(c.routes.keys["<leader>m"].mode[1] == "n" and c.routes.keys["<leader>m"].mode[2] == "v", "multi-mode keys accepted")
+	local variants = c.routes.keys["<leader>m"]
+	expect(
+		#variants == 2 and variants[1].mode == "n" and variants[2].mode == "v",
+		"multi-mode keys expand into one variant per mode"
+	)
+end
+
+-- Empty mode values are lazy.nvim-compatible: "" is passed through to
+-- vim.keymap.set (multi-mode mapping), while {} resolves to no key handler
+-- but keeps the plugin lazy (so it never loads).
+do
+	local c = compile({ { "folke/x.nvim", name = "x", keys = { { lhs = "a", mode = "" } } } })
+	local variants = c.routes.keys["a"]
+	expect(#variants == 1 and variants[1].mode == "", "empty mode string is passed through")
+	expect(c.registry["x"].has_route == true, "empty mode string still marks the plugin lazy")
+end
+
+do
+	local c = compile({ { "folke/x.nvim", name = "x", keys = { { lhs = "a", mode = {} } } } })
+	expect(c.routes.keys["a"] == nil, "empty mode array creates no key route")
+	expect(c.registry["x"].has_route == true, "empty mode array still marks the plugin lazy")
+end
+
+do
+	local c = compile({ { "folke/x.nvim", name = "x", keys = { { lhs = "a", mode = { "n", "" } } } } })
+	local variants = c.routes.keys["a"]
+	expect(
+		#variants == 2 and variants[1].mode == "n" and variants[2].mode == "",
+		"empty mode inside an array is passed through"
+	)
+end
+
+do
+	local c = compile({
+		{
+			"folke/x.nvim",
+			name = "x",
+			keys = {
+				{
+					lhs = "<leader>ko",
+					rhs = "<cmd>X<CR>",
+					noremap = false,
+					nowait = true,
+					expr = true,
+					buffer = 0,
+				},
+			},
+		},
+	})
+	local route = c.routes.keys["<leader>ko"][1]
+	expect(
+		route ~= nil
+			and route.noremap == nil
+			and route.nowait == nil
+			and route.expr == nil
+			and route.buffer == nil,
+		"keys: unsupported vim.keymap.set options are dropped"
+	)
+end
+
+-- Key variants: one trigger per (lhs, mode), independent across specs.
+do
+	local c = compile({
+		{ "A/first", name = "first", keys = "x" },
+		{ "B/second", name = "second", keys = { { lhs = "x", mode = "v" } } },
+	})
+	local variants = c.routes.keys["x"]
+	expect(#variants == 2, "same lhs across specs: one variant per mode")
+	expect(
+		variants[1].mode == "n" and variants[1].ids[1] == "first",
+		"n variant keeps only the n declaration"
+	)
+	expect(
+		variants[2].mode == "v" and variants[2].ids[1] == "second",
+		"v variant keeps only the v declaration"
+	)
+end
+
+do
+	local c = compile({
+		{
+			"user/both",
+			name = "both",
+			keys = {
+				{ lhs = "x", mode = "n", rhs = "<cmd>N<CR>" },
+				{ lhs = "x", mode = "v", rhs = "<cmd>V<CR>" },
+			},
+		},
+	})
+	local variants = c.routes.keys["x"]
+	expect(#variants == 2, "same lhs within one spec: one variant per mode")
+	expect(
+		variants[1].mode == "n" and variants[1].rhs == "<cmd>N<CR>" and variants[2].mode == "v" and variants[2].rhs == "<cmd>V<CR>",
+		"within-spec variants keep their own rhs"
+	)
+	expect(#variants[1].ids == 1 and #variants[2].ids == 1, "within-spec variants route the plugin once each")
+end
+
+do
+	local c = compile({
+		{
+			"user/array",
+			name = "array",
+			keys = { { lhs = "x", mode = { "n", "n", "v", "x" }, rhs = "<cmd>X<CR>" } },
+		},
+	})
+	local variants = c.routes.keys["x"]
+	expect(#variants == 3, "duplicate modes in an array collapse into one variant")
+	expect(
+		variants[1].mode == "n" and variants[2].mode == "v" and variants[3].mode == "x",
+		"mode-array order preserved"
+	)
+end
+
+-- Same lhs + same mode: shared trigger map, first declaration's rhs/opts
+-- win; every declaring plugin still loads on the key.
+do
+	local msgs = {}
+	vim.notify = function(msg, _)
+		table.insert(msgs, msg)
+	end
+	local c = compile({
+		{ "A/first", name = "first", keys = { { lhs = "x", rhs = "<cmd>First<CR>", desc = "first" } } },
+		{ "B/second", name = "second", keys = { { lhs = "x", rhs = "<cmd>Second<CR>" } } },
+	})
+	vim.notify = function() end
+	local variants = c.routes.keys["x"]
+	expect(#variants == 1, "same lhs + same mode: single shared variant")
+	expect(variants[1].rhs == "<cmd>First<CR>" and variants[1].desc == "first", "same lhs + same mode: first rhs/opts kept")
+	expect(#variants[1].ids == 2 and variants[1].ids[1] == "first" and variants[1].ids[2] == "second", "same-mode variant loads every declaring plugin")
+	local warned = false
+	for _, m in ipairs(msgs) do
+		if m:find("shared by multiple plugins", 1, true) then
+			warned = true
+		end
+	end
+	expect(warned, "same lhs + same mode with different rhs warns")
+end
+
+do
+	local msgs = {}
+	vim.notify = function(msg, _)
+		table.insert(msgs, msg)
+	end
+	local c = compile({
+		{ "A/first", name = "first", keys = { { lhs = "x", mode = "v", rhs = "<cmd>X<CR>" } } },
+		{ "B/second", name = "second", keys = { { lhs = "x", mode = "n", rhs = "<cmd>X<CR>" } } },
+	})
+	vim.notify = function() end
+	local variants = c.routes.keys["x"]
+	expect(#variants == 2, "same lhs + different modes: both variants survive")
+	local warned = false
+	for _, m in ipairs(msgs) do
+		if m:find("shared by multiple plugins", 1, true) then
+			warned = true
+		end
+	end
+	expect(not warned, "same lhs + different modes does not warn")
+end
+
+do
+	local msgs = {}
+	vim.notify = function(msg, _)
+		table.insert(msgs, msg)
+	end
+	local c = compile({
+		{
+			"user/dup",
+			name = "dup",
+			keys = {
+				{ lhs = "x", mode = "n", rhs = "<cmd>A<CR>" },
+				{ lhs = "x", mode = "n", rhs = "<cmd>A<CR>" },
+			},
+		},
+	})
+	vim.notify = function() end
+	local variant = c.routes.keys["x"][1]
+	expect(#variant.ids == 1, "same plugin declaring the same variant twice routes it once")
+	local warned = false
+	for _, m in ipairs(msgs) do
+		if m:find("shared by multiple plugins", 1, true) then
+			warned = true
+		end
+	end
+	expect(not warned, "identical duplicate variant does not warn")
 end
 
 -- Dependency expansion: purity, nested drop warning, shape validation
@@ -629,12 +1052,11 @@ do
 			submodules = false,
 			optional = true,
 			import = "lua/plugins",
-			lazy = true,
 			specs = {},
 		},
 	})
 	vim.notify = function() end
-	for _, field in ipairs({ "submodules", "optional", "import", "lazy", "specs" }) do
+	for _, field in ipairs({ "submodules", "optional", "import", "specs" }) do
 		local found = false
 		for _, m in ipairs(msgs) do
 			if m:find("'" .. field .. "'", 1, true) then
@@ -652,7 +1074,7 @@ do
 		end
 		expect(not found, "supported field '" .. field .. "' does not warn")
 	end
-	expect(#msgs == 5, "exactly one warning per unsupported field (got " .. #msgs .. ")")
+	expect(#msgs == 4, "exactly one warning per unsupported field (got " .. #msgs .. ")")
 end
 
 do

@@ -65,18 +65,22 @@ return {
 		},
 		events = {
 			BufReadPost = {
-				ids = {
-					"plugin",
+				{
+					ids = {
+						"plugin",
+					},
 				},
 			},
 		},
 		fts = {},
 		keys = {
 			["<leader>p"] = {
-				ids = {
-					"my-plugin",
+				{
+					ids = {
+						"my-plugin",
+					},
+					mode = "n",
 				},
-				mode = "n",
 			},
 		},
 		modules = {},

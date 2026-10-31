@@ -543,34 +543,48 @@ local function build_plan(compiled, opts)
 
 		if next(routes.events) then
 			local group = events_group
-			-- Bucket events by autocmd pattern: one API call per bucket
-			-- instead of one per event (~1.3 us each). `once = true` is
-			-- per-event-row (verified: rows self-delete independently), so
-			-- fire-once semantics are unchanged; per-fire dispatch on
-			-- ev.event is a single hash lookup.
-			local buckets = {} ---@type table<string, { pattern?: string, names: string[] }>
+			-- routes.events[event] is a list of pattern variants (one per
+			-- distinct (event, pattern) pair). Bucket variants by autocmd
+			-- pattern: one API call per bucket instead of one per event
+			-- (~1.3 us each). `once = true` is per-event-row (verified: rows
+			-- self-delete independently), so fire-once semantics are
+			-- unchanged; the callback dispatches on ev.event and only loads
+			-- that event's ids (a bucket may hold several event names).
+			local buckets = {} ---@type table<string, { pattern?: string, names: string[], routes: {event: string, ids: string[]}[] }>
 			local border = {}
-			for event, ev in pairs(routes.events) do
+			for event, variants in pairs(routes.events) do
 				if event == "VeryLazy" then
+					-- Synthetic event (lazy.nvim maps it to User VeryLazy; the
+					-- UIEnter emitter is installed unconditionally above). Any
+					-- pattern variant still fires the one VeryLazy load.
+					local verylazy_ids = {}
+					for _, variant in ipairs(variants) do
+						for _, id in ipairs(variant.ids) do
+							table.insert(verylazy_ids, id)
+						end
+					end
 					vim.api.nvim_create_autocmd("User", {
 						group = group,
 						pattern = "VeryLazy",
 						once = true,
 						callback = function ()
-							for _, id in ipairs(ev.ids) do
+							for _, id in ipairs(verylazy_ids) do
 								load_with_deps(id)
 							end
 						end
 					})
 				else
-					local key = ev.pattern or ""
-					local b = buckets[key]
-					if not b then
-						b = { pattern = ev.pattern, names = {} }
-						buckets[key] = b
-						table.insert(border, b)
+					for _, variant in ipairs(variants) do
+						local key = variant.pattern or ""
+						local b = buckets[key]
+						if not b then
+							b = { pattern = variant.pattern, names = {}, routes = {} }
+							buckets[key] = b
+							table.insert(border, b)
+						end
+						table.insert(b.names, event)
+						table.insert(b.routes, { event = event, ids = variant.ids })
 					end
-					table.insert(b.names, event)
 				end
 			end
 			for _, b in ipairs(border) do
@@ -579,11 +593,16 @@ local function build_plan(compiled, opts)
 					pattern = b.pattern,
 					once = true,
 					callback = function (ev)
-						local entry = routes.events[ev.event]
-						if entry then
-							for _, id in ipairs(entry.ids) do
-								load_with_deps(id)
+						local matched = false
+						for _, route in ipairs(b.routes) do
+							if route.event == ev.event then
+								matched = true
+								for _, id in ipairs(route.ids) do
+									load_with_deps(id)
+								end
 							end
+						end
+						if matched then
 							refire_event(ev.event, ev.buf)
 						end
 					end
@@ -665,12 +684,15 @@ local function build_plan(compiled, opts)
 			})
 		end
 
-		for _, entry in pairs(routes.keys) do
-			local lhs = entry.lhs
-			local mode = entry.mode
-			local ids = entry.ids
-			local rhs = entry.rhs
-			do
+		-- One trigger map per (lhs, mode) variant. A `mode` array in the
+		-- spec is already expanded by compile, so each variant owns exactly
+		-- one mode: deleting this trigger (takeover, below) only touches its
+		-- own mode, and the other variants stay live for their modes.
+		for lhs, variants in pairs(routes.keys) do
+			for _, entry in ipairs(variants) do
+				local mode = entry.mode
+				local ids = entry.ids
+				local rhs = entry.rhs
 				local keymap_opts = { desc = entry.desc or "laze: load on key" }
 				if entry.silent ~= nil then
 					keymap_opts.silent = entry.silent
@@ -680,9 +702,11 @@ local function build_plan(compiled, opts)
 					if rhs == nil then
 						-- No rhs: the plugin's own keymap takes over after load.
 						-- Delete the trigger NOW — at this point it is the only
-						-- map for this lhs. Deleting after loading would remove
-						-- the freshly registered plugin map too (vim.keymap.del
-						-- removes every map for the lhs).
+						-- map for this lhs in this mode (other mode variants
+						-- are separate maps and must stay). Deleting after
+						-- loading would remove the freshly registered plugin
+						-- map too (vim.keymap.del removes every map for the
+						-- lhs in the mode).
 						pcall(vim.keymap.del, mode, lhs)
 					end
 					for _, id in ipairs(ids) do

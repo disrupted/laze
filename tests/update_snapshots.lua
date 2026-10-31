@@ -2,7 +2,9 @@
 ---
 --- Regenerates all snapshot files from current compile output.
 --- Run: nvim --cmd "set rtp+=." -l tests/update_snapshots.lua
---- Or (standalone): luajit tests/update_snapshots.lua (if run from repo root)
+--- Or (standalone): luajit tests/update_snapshots.lua (if run from repo root).
+--- Plain Lua can regenerate ref-only fixtures; a fixture with a version-only
+--- semver range needs Neovim's vim.version.range.
 package.path = string.format("./lua/?.lua;%s", package.path)
 
 local compile = require("laze.compile").compile
@@ -58,10 +60,12 @@ local fixtures = {
 	"deps_dedup",
 	"event_pattern",
 	"keys_opts",
+	"keys_variants",
 	"cond_enabled",
 	"name_derivation",
 	"priority_build",
 	"opts_main",
+	"dev_version",
 }
 
 local function serialize(val, indent)
@@ -144,7 +148,7 @@ for _, name in ipairs(fixtures) do
 	if not ok then
 		print(("  ✗ %s: could not load fixture — %s"):format(name, fixture))
 	else
-		local compiled = compile(fixture.specs)
+		local compiled = compile(fixture.specs, fixture.opts)
 		local content = serialize_compiled(compiled)
 		local path = SNAPSHOT_DIR .. "/" .. name .. ".lua"
 		local f = io.open(path, "w")

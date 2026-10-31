@@ -1,11 +1,12 @@
 # Performance
 
-Status: 2026-08, Neovim 0.12.4. Measured by `tests/run.lua perf`:
+Status: 2026-10, Neovim 0.12.6. Measured by `tests/run.lua perf` (ranges
+vary by machine and by whether the full suite or perf-only mode is used):
 
 ```
-compile 50 plugins:        ~3.7 ms  (threshold 20ms)
-build_plan 50 plugins:     ~0.06 ms (threshold 50ms)
-plan execution (30 eager): ~2.5 ms  (threshold 30ms)
+compile 50 plugins:        ~0.7–1.3 ms (threshold 20ms)
+build_plan 50 plugins:     ~0.02–0.09 ms (threshold 50ms)
+plan execution (30 eager): ~0.5–0.9 ms (threshold 30ms)
 ```
 
 All critical paths are one-shot (compile/setup) or deferred (load time).
@@ -92,16 +93,19 @@ real-plugin cold start 9.58ms → 7.19ms.
 ### plan.lua: one autocmd per event name — resolved (2026-09)
 
 `plan()` created one autocmd per distinct event (~12 µs each).
-`nvim_create_autocmd` accepts an event list in one call, so events
+`nvim_create_autocmd` accepts an event list in one call, so variants
 sharing a pattern are now wired by a single call dispatching on
 `ev.event` (100 distinct events: ~130 µs saved, ~10 µs at realistic
-scale; no memory win — nvim still stores N rows). `once = true` is
-per-event-row (verified: rows self-delete independently), so fire-once
-semantics are unchanged. VeryLazy stays separate (not a real event).
-Required a compile-side fix found by the new tests: Neovim stores
-`BufRead`→`BufReadPost`, `BufCreate`→`BufAdd`, `BufWrite`→`BufWritePre`
-(verified by create + read-back), so route keys are canonicalized in
-`normalize_events` — the grouped dispatch looks them up by `ev.event`.
+scale; no memory win — nvim still stores N rows). Routes are modelled
+per distinct `(event, pattern)` variant, so different patterns for the
+same event are separate buckets (separate calls) while the patternless
+bucket stays unrestricted. `once = true` is per-event-row (verified:
+rows self-delete independently), so fire-once semantics are unchanged.
+VeryLazy stays separate (not a real event). Required a compile-side fix
+found by the new tests: Neovim stores `BufRead`→`BufReadPost`,
+`BufCreate`→`BufAdd`, `BufWrite`→`BufWritePre` (verified by create +
+read-back), so route keys are canonicalized in `normalize_events` — the
+grouped dispatch matches on `ev.event`.
 
 ### plan.lua: N per-trigger autocmds for ft/cmd routes — resolved (2026-09)
 
@@ -114,8 +118,8 @@ that does an O(1) `routes` hash lookup on `ev.match`
 from `load_with_deps`' `loaded[]` guard (the old per-ft `once`
 self-delete is subsumed by it); misfires on unrelated
 filetypes/commands cost one hash miss. Events were already one
-autocmd per event name; keys need one mapping per lhs by nature
-(`vim.keymap.set`, ~15 µs each — accepted, inherent API cost).
+autocmd per event name; keys need one mapping per `(lhs, mode)` variant
+by nature (`vim.keymap.set`, ~15 µs each — accepted, inherent API cost).
 
 ### plan.lua: O(N×M) route scan on every startup — resolved
 
@@ -167,6 +171,15 @@ Each lazy activation of a pack plugin does: one `:packadd`
 Dir plugins instead prepend to `'runtimepath'` and source `plugin/` +
 `ftdetect/` globs manually. Startup-requested lazy plugins defer all
 sourcing to the `VimEnter` finalizer. This is deferred I/O by design.
+
+### compile.lua: version range lowering
+
+`validate_spec` validates a range and returns the `VersionRange` so
+`resolve_version` reuses it; a range that cannot win precedence is not parsed.
+Each used range is parsed once. This is new work relative to main, which only
+converted `"*"`: 100 versioned specs ~0.20–0.22 ms vs ~0.06 ms before; 100
+plain specs unchanged (~0.07 ms). The cost is inherent to faithful lowering,
+not a regression in an existing path.
 
 ### Compile-time micro-items (negligible, one-shot)
 
@@ -249,3 +262,10 @@ nvim -u NONE --headless -l tests/benchmarks/compile_only.lua
 # Fair comparison: laze.nvim vs lazy.nvim
 nvim -u NONE --headless -l tests/benchmarks/compile_compare.lua
 ```
+
+Latest manual run (2026-10, Neovim 0.12.6, 4 real dir plugins):
+`compile_only` cold 1.30–1.33 ms / warm 0.92–0.96 ms; `compile_compare`
+laze ~1.2 ms vs lazy.nvim 4.8–21 ms (the high end is a first-run outlier).
+All four specs are `dir`, so laze does no `vim.pack.add`: this compares
+laze compile+plan with lazy.nvim's full `setup()`, not an install path.
+`bench.sh` startup numbers are dominated by process startup.

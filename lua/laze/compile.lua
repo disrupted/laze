@@ -1,6 +1,7 @@
 local TRIGGER_FIELDS = { "event", "ft", "cmd", "keys" }
 local ARRAY_TRIGGER_FIELDS = { "ft", "cmd" }
 local SOURCE_FIELDS = { "dir", "url", "name" }
+local VERSION_REF_FIELDS = { "branch", "tag", "commit" }
 
 local function normalize_array(v)
 	if v == nil then
@@ -164,7 +165,8 @@ local EVENT_ALIASES = {
 	BufWrite = "BufWritePre",
 }
 
---- Normalize lazy.nvim event values (string | string[] | {event,pattern}[]).
+--- Normalize lazy.nvim event values
+--- (string | string[] | {event,pattern} | {event,pattern}[]).
 ---@param v any
 ---@return {event: string, pattern?: string}[] -- event name and optional pattern
 local function normalize_events(v)
@@ -176,7 +178,12 @@ local function normalize_events(v)
 	end
 	if type(v) == "table" then
 		local result = {}
-		for _, item in ipairs(v) do
+		-- lazy.nvim's LazyEventSpec is a string, a list, or a single
+		-- { event = ..., pattern = ... } table. Treat the latter as a
+		-- one-item list: ipairs over a map-shaped table yields nothing, so
+		-- dropping it would silently turn a lazy spec eager.
+		local items = v.event ~= nil and { v } or v
+		for _, item in ipairs(items) do
 			if type(item) == "string" then
 				table.insert(result, { event = EVENT_ALIASES[item] or item })
 			elseif type(item) == "table" then
@@ -192,45 +199,214 @@ local function normalize_events(v)
 	return {}
 end
 
---- Resolve lazy.nvim version spec to a vim.pack-compatible version value.
---- lazy.nvim: version = "*" | "2.1.0" | false | (branch|tag|commit are separate fields)
---- vim.pack:  version only accepts a string (branch/tag/commit hash) or VersionRange.
----@param spec LazeSpec
----@return string|vim.VersionRange|nil
-local function resolve_version(spec)
-	local v = spec.version
-	if v == false then
-		-- lazy.nvim: false = "use default branch" → nil here (vim.pack default)
-		return nil
+-- lazy.nvim's `version` is a semver range, not a git ref. vim.version.range
+-- is lenient enough to misparse refs ("abc123" → 123.0.0), drop everything
+-- after the first comparator ("1.2 || 1.3", ">=1.2.0 <2.0.0"), and ignore
+-- trailing junk. Validate the whole string before handing it to vim.pack so
+-- an unrepresentable range fails at compile time instead of silently
+-- narrowing. Refs belong in branch/tag/commit.
+local function is_digit(b)
+	return b ~= nil and b >= 48 and b <= 57
+end
+
+local function is_wildcard(b)
+	return b == 42 or b == 120 or b == 88 -- * x X
+end
+
+local function is_ident_byte(b)
+	return b ~= nil
+		and ((b >= 48 and b <= 57) or (b >= 65 and b <= 90) or (b >= 97 and b <= 122) or b == 45)
+end
+
+-- Scan one version token after an optional comparator. Accepts the shapes
+-- lazy.nvim/vim.version.range support: partial versions, x/X/* wildcards,
+-- prerelease, and build metadata. Returns false on any trailing bytes.
+local function is_version_token(s, i)
+	local n = #s
+	local b = s:byte(i)
+	if b == 118 or b == 86 then -- v / V
+		i = i + 1
 	end
-	-- A `vim.version.range()` object passes straight through to vim.pack.
-	if type(v) == "table" then
-		return v
+	if not is_digit(s:byte(i)) then
+		return false
 	end
-	if v == "*" then
-		-- lazy.nvim: "*" = "latest tag". vim.pack honors VersionRange against tags.
-		if vim.version and vim.version.range then
-			return vim.version.range("*")
+
+	local numeric = 0
+	local wildcard = false
+	while i <= n do
+		b = s:byte(i)
+		if is_digit(b) then
+			if wildcard then
+				return false -- no numeric component after a wildcard
+			end
+			repeat
+				i = i + 1
+			until not is_digit(s:byte(i))
+			numeric = numeric + 1
+		elseif is_wildcard(b) then
+			wildcard = true
+			i = i + 1
+		else
+			break
 		end
-		return nil
+		if s:byte(i) == 46 then -- "."
+			i = i + 1
+			if i > n then
+				return false
+			end
+		else
+			break
+		end
 	end
-	-- Semver range strings ("v2.*", ">=1.0", "^1.2", "1.2 || 1.3") become
-	-- vim.pack VersionRanges. Branch/tag/commit strings carry no range
-	-- operator and stay plain strings.
-	if type(v) == "string" and v:find("[%*%^~<>=|,]") then
-		if vim.version and vim.version.range then
-			local ok, range = pcall(vim.version.range, v)
-			if ok then
-				return range
+	if numeric == 0 or numeric > 3 then
+		return false
+	end
+
+	-- Prerelease/build after a wildcard would be stripped by vim.version.range
+	-- along with the wildcard, so reject it rather than guess.
+	if wildcard and (s:byte(i) == 45 or s:byte(i) == 43) then
+		return false
+	end
+
+	local function scan_identifiers(j, stop_at_plus)
+		local start = j
+		while j <= n do
+			local bb = s:byte(j)
+			if is_ident_byte(bb) then
+				j = j + 1
+			elseif bb == 46 then -- "."
+				if j == start or s:byte(j - 1) == 46 then
+					return false
+				end
+				j = j + 1
+				if not is_ident_byte(s:byte(j)) then
+					return false
+				end
+			elseif bb == 43 and stop_at_plus then -- "+"
+				break
+			else
+				return false
 			end
 		end
+		if j == start then
+			return false
+		end
+		return j
 	end
-	if v ~= nil then
-		return v
+
+	if s:byte(i) == 45 then -- "-" prerelease
+		i = scan_identifiers(i + 1, true)
+		if i == false then
+			return false
+		end
 	end
-	-- lazy.nvim allows branch/tag/commit as independent fields; vim.pack only
-	-- has `version`. Map them: commit > tag > branch (most specific wins).
-	return spec.commit or spec.tag or spec.branch
+	if s:byte(i) == 43 then -- "+" build
+		i = scan_identifiers(i + 1, false)
+		if i == false then
+			return false
+		end
+	end
+	return i > n
+end
+
+local function is_range_operand(s, allow_comparator)
+	local i = 1
+	if allow_comparator then
+		local b = s:byte(i)
+		if b == 62 or b == 60 then -- > <
+			if s:byte(i + 1) == 61 then -- >= <=
+				i = i + 2
+			else
+				i = i + 1
+			end
+		elseif b == 94 or b == 126 or b == 61 then -- ^ ~ =
+			i = i + 1
+		end
+	end
+	return is_version_token(s, i)
+end
+
+local function looks_like_semver_range(v)
+	local n = #v
+	if n == 0 then
+		return true -- lazy.nvim and vim.version.range treat "" as "*"
+	end
+	if n == 1 and v:byte(1) == 42 then -- "*"
+		return true
+	end
+
+	-- The only whitespace accepted is a single hyphen-range separator. This
+	-- rejects compound ranges (" >=1.2.0 <2.0.0") instead of letting
+	-- vim.version.range keep only the first comparator.
+	local hyphen = v:find(" - ", 1, true)
+	if hyphen then
+		if v:find(" - ", hyphen + 3, true) then
+			return false
+		end
+		local a = v:sub(1, hyphen - 1)
+		local b = v:sub(hyphen + 3)
+		return a ~= "" and b ~= "" and is_range_operand(a, false) and is_range_operand(b, false)
+	end
+	for i = 1, n do
+		local b = v:byte(i)
+		if b == 32 or b == 9 or b == 10 or b == 13 then
+			return false
+		end
+	end
+	return is_range_operand(v, true)
+end
+
+---@param v string
+---@param idx? integer
+---@param spec_id? string
+---@return vim.VersionRange
+local function to_semver_range(v, idx, spec_id)
+	local prefix = idx and ("spec [" .. idx .. "]" .. (spec_id and (" (" .. spec_id .. ")") or "") .. ": ") or ""
+	if not looks_like_semver_range(v) then
+		error(
+			prefix
+				.. ("version %q is not a supported semver range (single ranges only; multi-range/whitespace sets are rejected; git refs belong in branch/tag/commit)"):format(
+					v
+				),
+			0
+		)
+	end
+	local range_fn = vim.version and vim.version.range
+	if type(range_fn) ~= "function" then
+		error(prefix .. "vim.version.range is required to lower version ranges", 0)
+	end
+	local ok, range = pcall(range_fn, v)
+	if not ok or range == nil then
+		error(prefix .. ("version %q is not a valid semver range"):format(v), 0)
+	end
+	return range
+end
+
+--- Resolve lazy.nvim version spec to a vim.pack-compatible version value.
+--- lazy.nvim: version = semver range string | false; branch/tag/commit are refs.
+--- vim.pack:  version accepts a git ref string or a VersionRange.
+---@param spec LazeSpec
+---@param idx? integer
+---@param range? vim.VersionRange Already validated by validate_spec
+---@return string|vim.VersionRange|nil
+local function resolve_version(spec, idx, range)
+	-- lazy.nvim precedence: commit > tag > version > branch.
+	if spec.commit ~= nil then
+		return spec.commit
+	end
+	if spec.tag ~= nil then
+		return spec.tag
+	end
+	local v = spec.version
+	if v ~= nil and v ~= false then
+		-- Field-based lowering: a version string is always a semver range,
+		-- never a git ref (refs use branch/tag/commit). Reuse the range
+		-- validated during compile instead of parsing the same string twice.
+		return range or to_semver_range(v, idx)
+	end
+	-- version = false (or omitted) means "do not pin a range"; branch still
+	-- applies, then vim.pack's default branch when neither is set.
+	return spec.branch
 end
 
 local function add_to_route(route_map, keys, plugin_id)
@@ -243,60 +419,93 @@ local function add_to_route(route_map, keys, plugin_id)
 	end
 end
 
---- Event routes now carry optional autocmd patterns (lazy.nvim `{event, pattern}` form).
---- One entry per event name: a second plugin using the same event with a
---- DIFFERENT pattern is a conflict (a single autocmd can only carry one) —
---- warn and keep the first instead of silently dropping the second.
+--- Event routes carry optional autocmd patterns (lazy.nvim `{event, pattern}` form).
+--- Each event name maps to a list of pattern variants: the same event with
+--- DIFFERENT patterns routes independently (plan.lua creates one autocmd per
+--- variant), while the same (event, pattern) pair shares one variant. Keying
+--- by name alone would make a patternless spec inherit another spec's pattern
+--- (and never load), or make a patterned spec fire unconditionally.
 local function add_to_event_route(route_map, events, plugin_id)
 	for i = 1, #events do
 		local ev = events[i]
-		local name = ev.event
-		if not route_map[name] then
-			route_map[name] = { ids = {}, pattern = ev.pattern }
-		elseif route_map[name].pattern ~= ev.pattern then
-			vim.notify(
-				("laze: event %q has conflicting patterns (%s vs %s) — keeping the first; give the plugins distinct events or matching patterns"):format(
-					name,
-					vim.inspect(route_map[name].pattern),
-					vim.inspect(ev.pattern)
-				),
-				vim.log.levels.WARN
-			)
+		local variants = route_map[ev.event]
+		if not variants then
+			variants = {}
+			route_map[ev.event] = variants
 		end
-		table.insert(route_map[name].ids, plugin_id)
+		local variant
+		for j = 1, #variants do
+			if variants[j].pattern == ev.pattern then
+				variant = variants[j]
+				break
+			end
+		end
+		if not variant then
+			variant = { pattern = ev.pattern, ids = {} }
+			table.insert(variants, variant)
+		end
+		table.insert(variant.ids, plugin_id)
 	end
 end
 
---- Same (lhs, mode) from two specs: the trigger map is shared, so
---- rhs/desc/silent must agree — warn and keep the first instead of
---- silently dropping the second spec's values. Different modes for the
---- same lhs are separate routes (e.g. <C-e> in insert vs normal mode).
+--- Key routes are per (lhs, mode) variant: `routes.keys[lhs]` is an array
+--- with one entry per normalized mode (a `mode` array expands to one
+--- variant per mode, in declaration order). Each variant is an independent
+--- trigger map, so an n-mode press can never fire a v-only declaration and
+--- vice versa. Variants sharing lhs+mode must agree on rhs/desc/silent:
+--- the trigger map is shared, so warn and keep the first instead of
+--- silently dropping the second spec's values.
 local function add_to_key_route(route_map, keys, plugin_id)
 	for i = 1, #keys do
 		local ke = keys[i]
 		local lhs = ke.lhs
 		local modes = type(ke.mode) == "table" and ke.mode or { ke.mode }
-		for _, mode in ipairs(modes) do
-			local route_key = lhs .. "\0" .. mode
-			if not route_map[route_key] then
-				route_map[route_key] = {
-					lhs = lhs,
-					mode = mode,
-					ids = {},
-					rhs = ke.rhs,
-					desc = ke.desc,
-					silent = ke.silent,
-				}
-			else
-				local cur = route_map[route_key]
-				if cur.rhs ~= ke.rhs or cur.desc ~= ke.desc or cur.silent ~= ke.silent then
+		local seen_modes = {}
+		for j = 1, #modes do
+			local mode = modes[j]
+			-- `mode = { "n", "n" }`: one variant, not two maps for one lhs.
+			-- An empty mode array creates no variants at all (lazy.nvim
+			-- resolves no key handler and keeps the plugin lazy); don't
+			-- leave an empty `routes.keys[lhs]` entry behind.
+			if not seen_modes[mode] then
+				seen_modes[mode] = true
+				local variants = route_map[lhs]
+				if not variants then
+					variants = {}
+					route_map[lhs] = variants
+				end
+				local variant
+				for k = 1, #variants do
+					if variants[k].mode == mode then
+						variant = variants[k]
+						break
+					end
+				end
+				if not variant then
+					variant = { mode = mode, ids = {}, rhs = ke.rhs, desc = ke.desc, silent = ke.silent }
+					table.insert(variants, variant)
+				elseif variant.rhs ~= ke.rhs or variant.desc ~= ke.desc or variant.silent ~= ke.silent then
 					vim.notify(
-						("laze: keys %q (mode %s) is shared by multiple plugins with different rhs/opts — keeping the first"):format(lhs, mode),
+						("laze: keys %q in mode %q is shared by multiple plugins with different rhs/opts — keeping the first"):format(
+							lhs,
+							mode
+						),
 						vim.log.levels.WARN
 					)
 				end
+				-- A plugin may declare the same (lhs, mode) more than once;
+				-- its id still appears once (it is loaded at most once).
+				local duplicate = false
+				for k = 1, #variant.ids do
+					if variant.ids[k] == plugin_id then
+						duplicate = true
+						break
+					end
+				end
+				if not duplicate then
+					table.insert(variant.ids, plugin_id)
+				end
 			end
-			table.insert(route_map[route_key].ids, plugin_id)
 		end
 	end
 end
@@ -399,29 +608,40 @@ local function validate_triggers(spec, idx, spec_id)
 	end
 
 	if type(spec.event) == "table" then
-		for i, item in ipairs(spec.event) do
-			if type(item) == "table" then
-				local ev = item.event
-				if type(ev) == "string" then
-					if ev == "" then
-						bad("event[" .. i .. "]", "event must not be empty")
-					end
-				elseif not is_string_array(ev) then
-					bad("event[" .. i .. "]", "must have event = string | string[]")
-				else
-					for _, e in ipairs(ev) do
-						if e == "" then
-							bad("event[" .. i .. "]", "event must not be empty")
-						end
+		local function check_event_spec(item, label)
+			local ev = item.event
+			if type(ev) == "string" then
+				if ev == "" then
+					bad(label, "event must not be empty")
+				end
+			elseif not is_string_array(ev) then
+				bad(label, "must have event = string | string[]")
+			else
+				for _, e in ipairs(ev) do
+					if e == "" then
+						bad(label, "event must not be empty")
 					end
 				end
-				if item.pattern ~= nil and type(item.pattern) ~= "string" then
-					bad("event[" .. i .. "]", "pattern must be a string")
+			end
+			if item.pattern ~= nil and type(item.pattern) ~= "string" then
+				bad(label, "pattern must be a string")
+			end
+		end
+
+		-- Single { event = ..., pattern = ... } table (lazy.nvim LazyEventSpec)
+		-- as well as the array form.
+		if spec.event.event ~= nil then
+			check_event_spec(spec.event, "event")
+		else
+			for i, item in ipairs(spec.event) do
+				local label = "event[" .. i .. "]"
+				if type(item) == "table" then
+					check_event_spec(item, label)
+				elseif type(item) ~= "string" then
+					bad(label, "must be a string or { event, pattern } table")
+				elseif item == "" then
+					bad(label, "must not be empty")
 				end
-			elseif type(item) ~= "string" then
-				bad("event[" .. i .. "]", "must be a string or { event, pattern } table")
-			elseif item == "" then
-				bad("event[" .. i .. "]", "must not be empty")
 			end
 		end
 	end
@@ -452,12 +672,13 @@ local function validate_triggers(spec, idx, spec_id)
 						"is not supported — use a top-level ft trigger, or install buffer-local maps from init"
 					)
 				end
-				if item.mode ~= nil then
-					if type(item.mode) == "string" then
-						-- ok
-					elseif not is_string_array(item.mode) then
-						bad("keys[" .. i .. "]", "mode must be a string or string[]")
-					end
+				-- lazy.nvim does not validate the contents of mode:
+				-- mode = "" is passed to vim.keymap.set (which creates a
+				-- multi-mode mapping), and mode = {} resolves to no key
+				-- handler while the plugin stays lazy. Match that behavior
+				-- instead of rejecting empty values.
+				if item.mode ~= nil and type(item.mode) ~= "string" and not is_string_array(item.mode) then
+					bad("keys[" .. i .. "]", "mode must be a string or string[]")
 				end
 			elseif type(item) ~= "string" then
 				bad("keys[" .. i .. "]", "must be a string or an entry table")
@@ -468,6 +689,10 @@ local function validate_triggers(spec, idx, spec_id)
 	end
 end
 
+---@param spec LazeSpec
+---@param idx integer
+---@param warned table<string, boolean>
+---@return vim.VersionRange|nil
 local function validate_spec(spec, idx, warned)
 	local src = spec[1] or spec.src
 	if not src and not spec.dir and not spec.url then
@@ -587,22 +812,33 @@ local function validate_spec(spec, idx, warned)
 	if spec.priority ~= nil and type(spec.priority) ~= "number" then
 		error("spec [" .. idx .. "] (" .. spec_id .. "): priority must be a number", 0)
 	end
-	if
-		spec.version ~= nil
-		and type(spec.version) ~= "string"
-		and type(spec.version) ~= "table"
-		and spec.version ~= false
-	then
-		error(
-			"spec [" .. idx .. "] (" .. spec_id .. "): version must be a string, vim.version.range(), or false",
-			0
-		)
+	local version_range
+	if spec.version ~= nil and spec.version ~= false then
+		if type(spec.version) ~= "string" then
+			error("spec [" .. idx .. "] (" .. spec_id .. "): version must be a string (semver range) or false", 0)
+		end
+		-- lazy.nvim's precedence is commit > tag > version > branch, so a
+		-- range that cannot win is not evaluated. Keep the type check above,
+		-- but only parse when version is actually eligible. This also lets
+		-- plain-Lua snapshot generation handle ref-only fixtures without a
+		-- vim.version stub. Return the object so resolve_version can reuse it
+		-- instead of parsing the same string twice.
+		if spec.commit == nil and spec.tag == nil then
+			version_range = to_semver_range(spec.version, idx, spec_id)
+		end
 	end
+	for _, f in ipairs(VERSION_REF_FIELDS) do
+		if spec[f] ~= nil and (type(spec[f]) ~= "string" or spec[f] == "") then
+			error("spec [" .. idx .. "] (" .. spec_id .. "): " .. f .. " must be a non-empty string", 0)
+		end
+	end
+
 	if spec.lazy ~= nil and type(spec.lazy) ~= "boolean" then
 		error("spec [" .. idx .. "] (" .. spec_id .. "): lazy must be a boolean", 0)
 	end
 
 	validate_triggers(spec, idx, spec_id)
+	return version_range
 end
 
 ---@param specs LazeSpec[]
@@ -721,7 +957,7 @@ function compile(specs, opts)
 	local warned = {}
 
 	for idx, spec in ipairs(expanded) do
-		validate_spec(spec, idx, warned)
+		local version_range = validate_spec(spec, idx, warned)
 
 		local src = spec[1] or spec.src
 		local dir = spec.dir
@@ -831,26 +1067,29 @@ function compile(specs, opts)
 		-- module names (cmp-buffer ships cmp_buffer).
 		local modname = norm.module
 
-		-- Resolve dev paths at compile time (once), not at plan/build time
-		local final_src = resolved_src
+		-- Resolve dev paths at compile time (once), not at plan/build time.
+		-- `dev_src` also records that the source is a local checkout: an
+		-- active dev path changes version handling below.
+		local dev_src
 		if norm.dev == true then
-			final_src = vim.fn.expand(dev_root .. "/" .. name)
+			dev_src = vim.fn.expand(dev_root .. "/" .. name)
 		elseif type(norm.dev) == "string" and norm.dev ~= "" then
 			-- dev = "path" is the per-plugin dev directory (lazy.nvim
 			-- semantics): ~ expands, absolute/relative stay verbatim —
 			-- consistent with dev_path and the README notes.
 			if norm.dev:byte(1) == 126 then -- "~"
-				final_src = vim.fn.expand(norm.dev)
+				dev_src = vim.fn.expand(norm.dev)
 			else
-				final_src = norm.dev
+				dev_src = norm.dev
 			end
 		elseif norm.dev_path then
 			if norm.dev_path:byte(1) == 126 then -- "~"
-				final_src = vim.fn.expand(norm.dev_path)
+				dev_src = vim.fn.expand(norm.dev_path)
 			else
-				final_src = norm.dev_path
+				dev_src = norm.dev_path
 			end
 		end
+		local final_src = dev_src or resolved_src
 
 		-- `dir` plugins are local: vim.pack never installs or manages them
 		-- (it would try to git-clone the path). They are loaded by the plan
@@ -901,7 +1140,16 @@ function compile(specs, opts)
 				-- and must never be used for :packadd.
 				name = pkg,
 			}
-			local resolved_version = resolve_version(spec)
+			-- An active dev path is a local, unmanaged checkout: lazy.nvim
+			-- turns `dev` into `dir` and never applies version/branch/tag/
+			-- commit to it. Lowering one here would make vim.pack clone the
+			-- dev path and check out that ref instead of loading the working
+			-- tree — the exact bug this guard prevents. Same policy as `dir`
+			-- (validate the range, never lower it; validate_spec already ran).
+			local resolved_version
+			if dev_src == nil then
+				resolved_version = resolve_version(spec, idx, version_range)
+			end
 			if resolved_version ~= nil then
 				pack_entry.version = resolved_version
 			end

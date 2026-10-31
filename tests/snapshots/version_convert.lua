@@ -22,9 +22,14 @@ return {
 			src = "https://github.com/user/plugin-version-false",
 		},
 		{
-			name = "plugin-version-priority",
-			src = "https://github.com/user/plugin-version-priority",
-			version = "v2.0.0",
+			name = "plugin-version-false-branch",
+			src = "https://github.com/user/plugin-version-false-branch",
+			version = "develop",
+		},
+		{
+			name = "plugin-tag-priority",
+			src = "https://github.com/user/plugin-tag-priority",
+			version = "v1.0.0",
 		},
 		{
 			name = "plugin-commit-priority",
@@ -77,6 +82,17 @@ return {
 			silent = false,
 			src = "https://github.com/user/plugin-tag",
 		},
+		["plugin-tag-priority"] = {
+			after = {},
+			enabled = true,
+			has_route = true,
+			id = "plugin-tag-priority",
+			is_dep = false,
+			pkg = "plugin-tag-priority",
+			priority = 50,
+			silent = false,
+			src = "https://github.com/user/plugin-tag-priority",
+		},
 		["plugin-version-false"] = {
 			after = {},
 			enabled = true,
@@ -88,29 +104,32 @@ return {
 			silent = false,
 			src = "https://github.com/user/plugin-version-false",
 		},
-		["plugin-version-priority"] = {
+		["plugin-version-false-branch"] = {
 			after = {},
 			enabled = true,
 			has_route = true,
-			id = "plugin-version-priority",
+			id = "plugin-version-false-branch",
 			is_dep = false,
-			pkg = "plugin-version-priority",
+			pkg = "plugin-version-false-branch",
 			priority = 50,
 			silent = false,
-			src = "https://github.com/user/plugin-version-priority",
+			src = "https://github.com/user/plugin-version-false-branch",
 		},
 	},
 	routes = {
 		cmds = {},
 		events = {
 			VeryLazy = {
-				ids = {
-					"plugin-branch",
-					"plugin-tag",
-					"plugin-commit",
-					"plugin-version-false",
-					"plugin-version-priority",
-					"plugin-commit-priority",
+				{
+					ids = {
+						"plugin-branch",
+						"plugin-tag",
+						"plugin-commit",
+						"plugin-version-false",
+						"plugin-version-false-branch",
+						"plugin-tag-priority",
+						"plugin-commit-priority",
+					},
 				},
 			},
 		},
