@@ -27,12 +27,14 @@ abstraction, import system, background scheduler, lifecycle framework.
   end, {})
   ```
 
-- **`lazy` flag.** What: `lazy = true` is consumed with a warning
-  (`UNSUPPORTED_FIELDS`: "no equivalent; plugins without triggers are eager").
-  Why not: magic-vs-explicit — triggers already determine laziness.
-  Alternative: delete the flag; add or remove a trigger:
+- **`lazy = true` (forcing a plugin lazy).** What: only `lazy = false` is
+  acted on (eager override, even for plugins with triggers or dependencies);
+  `lazy = true` is accepted and redundant.
+  Why not: magic-vs-explicit — triggers already determine laziness, so
+  there is no flag to force a trigger-less plugin lazy.
+  Alternative: add a trigger instead:
   ```lua
-  -- before: { "foo/bar", lazy = true, event = "VeryLazy" }
+  -- before: { "foo/bar", lazy = true }
   { "foo/bar", event = "VeryLazy" }
   ```
 
