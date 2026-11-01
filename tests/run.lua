@@ -356,6 +356,41 @@ do
 	end
 end
 
+-- Disabled plugins (cond = false / enabled = false) must not leave live key
+-- triggers: no map for `enabled`, and a cond-skipped trigger never runs its rhs
+do
+	local rhs_ran = false
+	local compiled = laze.compile({
+		{ dir = vim.fn.getcwd(), name = "keys-cond-off", cond = false,
+			keys = { { "<F13>", function () rhs_ran = true end }, { "<F14>" } } },
+		{ dir = vim.fn.getcwd(), name = "keys-enabled-off", enabled = false, keys = { { "<F15>" } } },
+	})
+	laze.build_plan(compiled)()
+
+	local function mapped(lhs)
+		return vim.fn.maparg(lhs, "n") ~= ""
+	end
+	if not mapped("<F15>") then
+		print("  ✓ keys: enabled = false installs no trigger map")
+		passed = passed + 1
+	else
+		print("  ✗ keys: enabled = false still installed a trigger map")
+		failed = failed + 1
+	end
+
+	vim.fn.maparg("<F13>", "n", false, true).callback()
+	vim.fn.maparg("<F14>", "n", false, true).callback()
+	if not rhs_ran and not mapped("<F13>") and not mapped("<F14>") then
+		print("  ✓ keys: cond = false skips rhs and removes the trigger")
+		passed = passed + 1
+	else
+		print(("  ✗ keys: cond = false (rhs_ran=%s, F13 mapped=%s, F14 mapped=%s)"):format(
+			tostring(rhs_ran), tostring(mapped("<F13>")), tostring(mapped("<F14>"))))
+		failed = failed + 1
+	end
+	vim.api.nvim_feedkeys("", "x", false) -- drain replayed keys
+end
+
 -- FileType dispatcher is registered for ft routes (single "*" entry),
 -- fires only for the matching filetype, and ignores unrelated ones
 do
